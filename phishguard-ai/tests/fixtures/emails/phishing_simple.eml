@@ -1,0 +1,27 @@
+From: "PayPal Account Security" <service-security@paypa1-support.com>
+To: target-analyst@enterprise.local
+Subject: URGENT: Your PayPal account has been limited due to suspicious activity
+Date: Tue, 08 Nov 2026 14:32:00 +0000
+Message-ID: <threat-test-001@paypa1-support.com>
+Reply-To: collect-creds@evil-redirect.ru
+Return-Path: <bounce@unverified-mail-relays.net>
+Authentication-Results: mx.enterprise.local;
+  spf=fail smtp.mailfrom=unverified-mail-relays.net;
+  dkim=fail header.d=paypa1-support.com;
+  dmarc=fail (p=reject) header.from=paypa1-support.com
+Received: from mail.unverified-mail-relays.net (mail.unverified-mail-relays.net [198.51.100.25])
+  by mx.enterprise.local with ESMTP id ABC123DEF
+  for <target-analyst@enterprise.local>; Tue, 08 Nov 2026 14:32:01 +0000
+Content-Type: text/html; charset="UTF-8"
+MIME-Version: 1.0
+
+<html>
+<body>
+<p>Dear Customer,</p>
+<p>We detected unauthorized login attempts from IP 198.51.100.44. Your account access has been restricted immediately.</p>
+<p>You must verify your identity within 24 hours to prevent permanent account suspension.</p>
+<p><a href="http://bit.ly/fake-paypal-verify?token=steal9981">CLICK HERE TO VERIFY YOUR PAYPAL ACCOUNT NOW</a></p>
+<p>Alternatively login directly via our IP mirror: <a href="http://198.51.100.12/login/verify">http://198.51.100.12/login/verify</a></p>
+<p>Thank you,<br/>PayPal Security Team</p>
+</body>
+</html>

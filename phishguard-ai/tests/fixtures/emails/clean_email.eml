@@ -1,0 +1,27 @@
+From: "Alice Montgomery" <alice.montgomery@legitimate-corp.com>
+To: bob.henderson@legitimate-corp.com
+Subject: Project Status Review: Sprint 42 Deliverables
+Date: Tue, 08 Nov 2026 10:15:00 +0000
+Message-ID: <clean-email-001@legitimate-corp.com>
+Reply-To: alice.montgomery@legitimate-corp.com
+Return-Path: <alice.montgomery@legitimate-corp.com>
+Authentication-Results: mx.legitimate-corp.com;
+  spf=pass smtp.mailfrom=legitimate-corp.com;
+  dkim=pass header.d=legitimate-corp.com;
+  dmarc=pass (p=reject) header.from=legitimate-corp.com
+Received: from mail.legitimate-corp.com (mail.legitimate-corp.com [203.0.113.10])
+  by mx.legitimate-corp.com with ESMTP id STATUS1234
+  for <bob.henderson@legitimate-corp.com>; Tue, 08 Nov 2026 10:15:01 +0000
+Content-Type: text/plain; charset="UTF-8"
+MIME-Version: 1.0
+
+Hi Bob,
+
+Please find the summary of our Sprint 42 accomplishments. All planned milestones were successfully reached on schedule.
+
+Let's meet tomorrow at 10:00 AM in Conference Room B to align on next week's backlog.
+
+Best regards,
+Alice Montgomery
+Senior Engineering Manager
+Legitimate Corp
