@@ -1,5 +1,4 @@
 # PhishGuard AI 🛡️
-# Best Project
 > **Enterprise-Grade AI-Powered Phishing Email Analyzer**  
 > A production-oriented cybersecurity platform for SOC analysts to detect, investigate, and document phishing threats.
 
