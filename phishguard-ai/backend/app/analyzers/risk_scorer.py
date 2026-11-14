@@ -204,6 +204,7 @@ class RiskScorer:
         findings = _ga(url_result, "findings", [])
         shortener_added = False
         ip_added = False
+        brand_impersonation_added = False
 
         for uf in findings:
             url_val = _ga(uf, "url_normalized") or _ga(uf, "url_raw", "")
@@ -239,6 +240,17 @@ class RiskScorer:
                     "URL uses IP address instead of hostname", triggered_iocs,
                 )
                 ip_added = True
+
+            brand_target = _ga(uf, "brand_impersonation_target")
+            if brand_target and not brand_impersonation_added:
+                brand_ioc = f"brand:{brand_target}"
+                if brand_ioc not in triggered_iocs:
+                    self._add_signal(
+                        signals, "brand_impersonation", "suspicious",
+                        f"URL mimics brand: {brand_target}", triggered_iocs,
+                        ioc_key=brand_ioc,
+                    )
+                    brand_impersonation_added = True
 
     # ------------------------------------------------------------------
     # Attachment signals

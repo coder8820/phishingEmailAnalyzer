@@ -470,17 +470,33 @@ function EmailAnalyzerContent() {
                         const hasFormAction = reasons.includes('form') || reasons.includes('action')
                         const hasMetaRefresh =
                           reasons.includes('meta refresh') || reasons.includes('refresh')
+                        const hasBrandImpersonation =
+                          reasons.includes('brand') || reasons.includes('typosquatting')
+                        const hasExcessiveSubdomains =
+                          reasons.includes('subdomain nesting') || reasons.includes('excessive subdomain')
+                        const hasUnusualPort =
+                          reasons.includes('port') || reasons.includes('non-standard')
+                        const hasObfuscation =
+                          reasons.includes('obfuscation') || reasons.includes('percent-encoded')
 
                         return (
                           <tr key={i} className="hover:bg-navy-750/50">
-                            <td className="py-3 px-4 font-mono text-slate-300 max-w-sm truncate select-all">
-                              {u.url_raw}
+                            <td className="py-3 px-4 font-mono text-slate-300 max-w-sm select-all">
+                              <div className="truncate">{u.url_raw}</div>
+                              {u.url_normalized && u.url_normalized !== u.url_raw && (
+                                <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                                  Normalized: {u.url_normalized}
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-4 font-mono text-slate-400">{u.domain || 'N/A'}</td>
                             <td className="py-3 px-4">
                               <div className="flex flex-wrap gap-1.5">
                                 {hasDeceptiveAnchor && (
                                   <Badge variant="critical">Deceptive Anchor</Badge>
+                                )}
+                                {hasBrandImpersonation && (
+                                  <Badge variant="critical">Brand Spoofing</Badge>
                                 )}
                                 {hasFormAction && (
                                   <Badge variant="danger">Form Action Target</Badge>
@@ -491,6 +507,9 @@ function EmailAnalyzerContent() {
                                 {u.is_shortener && <Badge variant="warning">Shortener</Badge>}
                                 {u.is_ip_based && <Badge variant="danger">IP-Based</Badge>}
                                 {u.is_punycode && <Badge variant="danger">Punycode</Badge>}
+                                {hasExcessiveSubdomains && <Badge variant="warning">Excessive Subdomains</Badge>}
+                                {hasUnusualPort && <Badge variant="warning">Unusual Port</Badge>}
+                                {hasObfuscation && <Badge variant="warning">Obfuscated Encoding</Badge>}
                                 {u.has_suspicious_params && (
                                   <Badge variant="warning">Suspicious Params</Badge>
                                 )}
@@ -500,7 +519,11 @@ function EmailAnalyzerContent() {
                                   !u.has_suspicious_params &&
                                   !hasDeceptiveAnchor &&
                                   !hasFormAction &&
-                                  !hasMetaRefresh && (
+                                  !hasMetaRefresh &&
+                                  !hasBrandImpersonation &&
+                                  !hasExcessiveSubdomains &&
+                                  !hasUnusualPort &&
+                                  !hasObfuscation && (
                                     <Badge variant="outline">Standard</Badge>
                                   )}
                               </div>

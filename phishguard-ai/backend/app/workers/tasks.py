@@ -186,6 +186,7 @@ async def execute_email_analysis(email_id: str, organization_id: str) -> None:
                     is_punycode=u.is_punycode,
                     is_homograph_suspect=u.is_homograph_suspect,
                     has_suspicious_params=u.has_suspicious_params,
+                    redirect_chain=u.redirect_chain or [],
                     reputation_score=ti_info.detections if ti_info else None,
                     reputation_source=ti_info.provider if ti_info else None,
                     is_malicious=is_mal,

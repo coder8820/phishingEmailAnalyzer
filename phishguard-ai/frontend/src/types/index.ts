@@ -99,12 +99,14 @@ export interface AIFinding {
 export interface ExtractedURL {
   id: string
   url_raw: string
+  url_normalized?: string
   domain?: string
   scheme?: string
   is_shortener: boolean
   is_ip_based: boolean
   is_punycode?: boolean
   has_suspicious_params?: boolean
+  redirect_chain?: Array<Record<string, unknown>>
   is_malicious?: boolean
   malicious_confidence?: string
   detection_reasons?: string[]
