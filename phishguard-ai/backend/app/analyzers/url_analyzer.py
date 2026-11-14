@@ -277,17 +277,27 @@ class URLAnalyzer:
             else:
                 netloc_norm = host
 
-            # Normalize path
+            # Normalize path (resolve . and .. segments while preserving leading/trailing slash structure)
+            import posixpath
             path = parsed.path or "/"
-            # Collapse multiple consecutive slashes except scheme
-            path = re.sub(r"/{2,}", "/", path)
+            has_trailing_slash = path.endswith("/") and path != "/"
+            # Normalize dot segments
+            normalized_path = posixpath.normpath(path)
+            if normalized_path == ".":
+                normalized_path = "/"
+            elif not normalized_path.startswith("/"):
+                normalized_path = "/" + normalized_path
+            if has_trailing_slash and not normalized_path.endswith("/"):
+                normalized_path += "/"
+            # Collapse multiple consecutive slashes
+            normalized_path = re.sub(r"/{2,}", "/", normalized_path)
 
             # Reconstruct normalized URL (drop fragment)
             normalized = urllib.parse.urlunsplit(
                 (
                     scheme,
                     netloc_norm,
-                    path,
+                    normalized_path,
                     parsed.query,
                     "",  # drop fragment for deduplication
                 )
