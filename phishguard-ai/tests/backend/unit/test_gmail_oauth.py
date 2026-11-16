@@ -464,7 +464,7 @@ async def test_token_refresh_and_revocation_handling(db_session, monkeypatch):
     await db_session.commit()
 
     # Simulate Google returning invalid_grant (user revoked access in myaccount.google.com)
-    async def mock_post_revoked(url, **kwargs):
+    async def mock_post_revoked(self, *args, **kwargs):
         r = MagicMock(spec=httpx.Response)
         r.status_code = 400
         r.json.return_value = {
@@ -512,7 +512,7 @@ async def test_disconnect_and_revocation(db_session):
     db_session.add(integration)
     await db_session.commit()
 
-    async def mock_revoke(url, **kwargs):
+    async def mock_revoke(self, *args, **kwargs):
         r = MagicMock(spec=httpx.Response)
         r.status_code = 200
         return r

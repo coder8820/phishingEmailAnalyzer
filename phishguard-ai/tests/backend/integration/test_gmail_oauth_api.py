@@ -57,19 +57,28 @@ async def test_oauth_callback_endpoint_success(authenticated_client: AsyncClient
         "historyId": "12345",
     }
 
-    async def mock_post(url, **kwargs):
-        r = MagicMock(spec=httpx.Response)
-        r.status_code = 200
-        r.json.return_value = google_tokens
-        return r
+    orig_post = httpx.AsyncClient.post
+    orig_get = httpx.AsyncClient.get
 
-    async def mock_get(url, **kwargs):
-        r = MagicMock(spec=httpx.Response)
-        r.status_code = 200
-        r.json.return_value = google_profile
-        return r
+    async def selective_post(self, *args, **kwargs):
+        url = args[0] if args else kwargs.get("url", "")
+        if "googleapis.com" in str(url):
+            r = MagicMock(spec=httpx.Response)
+            r.status_code = 200
+            r.json.return_value = google_tokens
+            return r
+        return await orig_post(self, *args, **kwargs)
 
-    with patch("httpx.AsyncClient.post", new=mock_post), patch("httpx.AsyncClient.get", new=mock_get):
+    async def selective_get(self, *args, **kwargs):
+        url = args[0] if args else kwargs.get("url", "")
+        if "googleapis.com" in str(url):
+            r = MagicMock(spec=httpx.Response)
+            r.status_code = 200
+            r.json.return_value = google_profile
+            return r
+        return await orig_get(self, *args, **kwargs)
+
+    with patch("httpx.AsyncClient.post", new=selective_post), patch("httpx.AsyncClient.get", new=selective_get):
         callback_res = await authenticated_client.post(
             "/api/v1/gmail/oauth/callback",
             json={"code": "sample_authorization_code", "state": state},

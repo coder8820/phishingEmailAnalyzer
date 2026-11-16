@@ -185,7 +185,11 @@ class GmailOAuthService:
             await db.commit()
             raise GoogleOAuthCSRFError("OAuth state does not match the currently authenticated user.")
 
-        if saved_state.expires_at < now:
+        state_expires_at = saved_state.expires_at
+        if state_expires_at.tzinfo is None:
+            state_expires_at = state_expires_at.replace(tzinfo=timezone.utc)
+
+        if state_expires_at < now:
             await db.delete(saved_state)
             await db.commit()
             raise GoogleOAuthCSRFError("OAuth state has expired. Please restart authorization.")
@@ -339,7 +343,10 @@ class GmailOAuthService:
         # Check if existing access token is still valid (with 5 min buffer)
         needs_refresh = True
         if integration.access_token_encrypted and integration.token_expires_at:
-            if integration.token_expires_at > now + timedelta(minutes=5):
+            token_exp = integration.token_expires_at
+            if token_exp.tzinfo is None:
+                token_exp = token_exp.replace(tzinfo=timezone.utc)
+            if token_exp > now + timedelta(minutes=5):
                 needs_refresh = False
 
         if not needs_refresh:
