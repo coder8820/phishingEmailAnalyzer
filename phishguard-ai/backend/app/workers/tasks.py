@@ -366,7 +366,7 @@ async def execute_email_analysis(email_id: str, organization_id: str) -> None:
                 gmsg.is_analyzed = True
                 gmsg.analysis_status = "analyzed"
                 gmsg.risk_score = score_result.score
-                gmsg.risk_classification = score_result.risk_classification
+                gmsg.risk_classification = score_result.classification.capitalize() if score_result.classification else "Safe"
 
             await session.commit()
             logger.info("analysis_completed_successfully for %s, risk_score=%s", email_id, score_result.score)

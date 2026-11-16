@@ -22,6 +22,8 @@ import {
   Inbox,
   Clock,
   Eye,
+  X,
+  FileText,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -31,6 +33,7 @@ import {
   disconnectGmail,
   toggleAutoAnalyze,
   syncGmailInbox,
+  runInitialInboxScan,
   analyzeGmailMessageManual,
   analyzeAllGmailPending,
   type GmailStatus,
@@ -56,6 +59,12 @@ export function GmailDefenseHub() {
   // Real Google OAuth 2.0 flow states
   const [isStartingOAuth, setIsStartingOAuth] = useState(false)
   const [configError, setConfigError] = useState<string | null>(null)
+
+  // Initial Scan explicit consent states
+  const [showConsentModal, setShowConsentModal] = useState(false)
+  const [consentChecked, setConsentChecked] = useState(false)
+  const [scanLimit, setScanLimit] = useState(25)
+  const [runningInitialScan, setRunningInitialScan] = useState(false)
 
   // Check URL query parameters on return from backend callback
   useEffect(() => {
@@ -167,13 +176,37 @@ export function GmailDefenseHub() {
   const handleSync = async () => {
     setSyncing(true)
     try {
-      await syncGmailInbox()
-      toast.success('Gmail inbox synchronized successfully')
+      const res = await syncGmailInbox()
+      toast.success(res.message || `Synchronized: ${res.synced_count} new messages retrieved (${res.skipped_count} skipped)`)
       await loadData(true)
     } catch (err: any) {
-      toast.error('Failed to sync Gmail')
+      const detail = err.response?.data?.detail || err.message || 'Failed to sync Gmail'
+      toast.error(detail)
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const handleInitialScanSubmit = async () => {
+    if (!consentChecked) {
+      toast.error('Explicit consent must be confirmed before proceeding.')
+      return
+    }
+    setRunningInitialScan(true)
+    try {
+      const res = await runInitialInboxScan({
+        consent_acknowledged: true,
+        max_messages: scanLimit,
+      })
+      toast.success(res.message || `Initial Scan Complete: ${res.synced_count} messages retrieved (${res.skipped_count} skipped)`)
+      setShowConsentModal(false)
+      setConsentChecked(false)
+      await loadData(true)
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || err.message || 'Initial scan failed'
+      toast.error(detail)
+    } finally {
+      setRunningInitialScan(false)
     }
   }
 
@@ -286,6 +319,17 @@ export function GmailDefenseHub() {
               >
                 <RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin text-accent-blue')} />
                 <span>Sync Inbox</span>
+              </button>
+
+              {/* Initial Inbox Scan with Explicit Consent */}
+              <button
+                onClick={() => setShowConsentModal(true)}
+                disabled={syncing || runningInitialScan}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:border-amber-500/50 rounded-xl text-xs font-mono transition-colors"
+                title="Scan historical inbox emails with explicit user consent"
+              >
+                <Shield className="w-3.5 h-3.5 text-amber-400" />
+                <span>Initial Scan</span>
               </button>
 
               {/* Analyze All Pending */}
@@ -593,6 +637,111 @@ export function GmailDefenseHub() {
           <p className="text-[10px] text-slate-500 font-mono mt-3">
             Offline access enabled for autonomous background monitoring & quarantine.
           </p>
+        </div>
+      )}
+
+      {/* Explicit Consent Modal for Initial Historical Inbox Scan */}
+      {showConsentModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-navy-900 border border-navy-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative space-y-5 animate-in fade-in duration-200">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-500/15 border border-amber-500/30 rounded-xl text-amber-400">
+                  <Shield className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-mono">
+                    Initial Gmail Inbox Scan
+                  </h3>
+                  <p className="text-xs text-slate-400 font-mono">
+                    Explicit Authorization Required
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowConsentModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-4 text-xs font-mono text-slate-300 space-y-2.5">
+              <p className="leading-relaxed">
+                PhishGuard AI requires explicit user consent before retrieving historical emails from your connected Google account:
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-slate-400 pl-1">
+                <li>Retrieves only messages currently in your <strong className="text-slate-200">INBOX</strong>.</li>
+                <li>Strictly excludes <strong className="text-slate-200">Sent, Drafts, Spam, and Trash</strong>.</li>
+                <li>Raw MIME content is decoded losslessly and evaluated with zero data leakage.</li>
+                <li>Duplicate analyses are strictly prevented via idempotent message tracking.</li>
+              </ul>
+            </div>
+
+            {/* Scan Limit Selector */}
+            <div className="flex items-center justify-between text-xs font-mono text-slate-300">
+              <span>Maximum messages to inspect:</span>
+              <div className="flex items-center gap-2">
+                {[10, 25, 50].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => setScanLimit(num)}
+                    className={cn(
+                      'px-2.5 py-1 rounded-lg border transition-colors',
+                      scanLimit === num
+                        ? 'bg-accent-blue/20 text-accent-blue border-accent-blue/50 font-bold'
+                        : 'bg-navy-800 text-slate-400 border-navy-700 hover:text-white'
+                    )}
+                  >
+                    {num}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Explicit Consent Checkbox */}
+            <label className="flex items-start gap-3 p-3.5 bg-amber-500/10 border border-amber-500/25 rounded-xl cursor-pointer">
+              <input
+                type="checkbox"
+                checked={consentChecked}
+                onChange={(e) => setConsentChecked(e.target.checked)}
+                className="mt-0.5 rounded border-navy-700 bg-navy-800 text-amber-500 focus:ring-0 cursor-pointer"
+              />
+              <span className="text-xs text-amber-200/90 font-mono leading-relaxed select-none">
+                I explicitly consent to PhishGuard AI scanning up to {scanLimit} historical messages from my connected Gmail INBOX for phishing threat analysis.
+              </span>
+            </label>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowConsentModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-mono text-slate-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleInitialScanSubmit}
+                disabled={!consentChecked || runningInitialScan}
+                className="flex items-center gap-2 px-5 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:bg-slate-750 disabled:text-slate-500 text-slate-950 rounded-xl text-xs font-mono font-bold transition-all disabled:cursor-not-allowed shadow-lg shadow-amber-500/10"
+              >
+                {runningInitialScan ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Scanning INBOX...</span>
+                  </>
+                ) : (
+                  <>
+                    <Shield className="w-3.5 h-3.5" />
+                    <span>Authorize & Start Scan</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

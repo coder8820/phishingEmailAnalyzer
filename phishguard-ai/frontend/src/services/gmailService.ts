@@ -129,6 +129,18 @@ export async function getGmailMessages(params?: {
   return data.data
 }
 
+export interface SyncInboxResult {
+  synced_count: number
+  skipped_count: number
+  total_inbox_estimate: number
+  message: string
+}
+
+export interface InitialScanPayload {
+  consent_acknowledged: boolean
+  max_messages?: number
+}
+
 export async function analyzeGmailMessageManual(messageId: string): Promise<any> {
   const { data } = await apiClient.post(`/gmail/messages/${messageId}/analyze`)
   return data.data
@@ -139,7 +151,12 @@ export async function analyzeAllGmailPending(): Promise<any> {
   return data.data
 }
 
-export async function syncGmailInbox(): Promise<any> {
-  const { data } = await apiClient.post('/gmail/sync')
+export async function syncGmailInbox(maxMessages: number = 20): Promise<SyncInboxResult> {
+  const { data } = await apiClient.post(`/gmail/sync?max_messages=${maxMessages}`)
+  return data.data
+}
+
+export async function runInitialInboxScan(payload: InitialScanPayload): Promise<SyncInboxResult> {
+  const { data } = await apiClient.post('/gmail/initial-scan', payload)
   return data.data
 }
