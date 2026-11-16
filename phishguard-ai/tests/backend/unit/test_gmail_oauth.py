@@ -404,7 +404,7 @@ async def test_preserve_refresh_token_on_reauthorization(db_session, monkeypatch
     _, reauth_state = await service.create_authorization_url(db=db_session, user=user)
 
     # Google response with access token ONLY (no refresh token returned)
-    async def mock_post(url, **kwargs):
+    async def mock_post(self, *args, **kwargs):
         r = MagicMock(spec=httpx.Response)
         r.status_code = 200
         r.json.return_value = {
@@ -415,7 +415,7 @@ async def test_preserve_refresh_token_on_reauthorization(db_session, monkeypatch
         }
         return r
 
-    async def mock_get(url, **kwargs):
+    async def mock_get(self, *args, **kwargs):
         r = MagicMock(spec=httpx.Response)
         r.status_code = 200
         r.json.return_value = {"emailAddress": "reauth.test@gmail.com"}
