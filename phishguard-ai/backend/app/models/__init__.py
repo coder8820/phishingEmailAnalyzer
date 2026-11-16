@@ -665,6 +665,9 @@ class GmailMessage(Base):
     integration_id = Column(UUID(as_uuid=True), ForeignKey("gmail_integrations.id", ondelete="CASCADE"), nullable=False)
     
     gmail_message_id = Column(String(255), nullable=False)
+    thread_id = Column(String(255), nullable=True)
+    label_ids = Column(JSONB, nullable=True, default=list)
+    internal_date = Column(DateTime(timezone=True), nullable=True)
     subject = Column(String(500), nullable=False)
     sender = Column(String(255), nullable=False)
     snippet = Column(Text, nullable=True)
@@ -677,6 +680,7 @@ class GmailMessage(Base):
     risk_score = Column(Float, nullable=True)
     risk_classification = Column(String(50), nullable=True)  # Safe | Suspicious | Malicious | Critical
     email_id = Column(UUID(as_uuid=True), ForeignKey("emails.id", ondelete="SET NULL"), nullable=True)
+    error_message = Column(Text, nullable=True)
 
     created_at = now_utc()
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -687,6 +691,7 @@ class GmailMessage(Base):
     __table_args__ = (
         Index("idx_gmail_msg_org", "organization_id", "user_id"),
         Index("idx_gmail_msg_unique", "integration_id", "gmail_message_id", unique=True),
+        UniqueConstraint("integration_id", "gmail_message_id", name="uq_gmail_integration_msg"),
     )
 
 

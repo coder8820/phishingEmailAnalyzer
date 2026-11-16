@@ -32,6 +32,13 @@ from app.services.gmail_oauth_service import (
     GmailAccountConflictError,
     GoogleTokenRevokedError,
 )
+from app.services.gmail_client_service import (
+    gmail_client_service,
+    GmailAPIError,
+    GmailRateLimitError,
+    GmailPermissionError,
+    GmailInitialScanConsentRequiredError,
+)
 from app.workers.tasks import execute_email_analysis
 from app.utils.response import success_response, error_response
 
@@ -62,153 +69,13 @@ class OAuthCallbackRequest(BaseModel):
     redirect_uri: Optional[str] = None
 
 
+class InitialScanRequest(BaseModel):
+    consent_acknowledged: bool = False
+    max_messages: int = 50
+
+
 class ToggleAutoAnalyzeRequest(BaseModel):
     enabled: bool
-
-
-# ---------------------------------------------------------------------------
-# Synthetic / Seed Inbox Generator (Simulates live Gmail API fetch)
-# ---------------------------------------------------------------------------
-
-def _generate_seed_gmail_messages(user_email: str) -> list[dict]:
-    """
-    Generates high-fidelity realistic emails for the user's Gmail inbox,
-    including authentic corporate notices, dangerous credential phishing,
-    urgent BEC CEO fraud, fake invoice malware baits, and legitimate updates.
-    """
-    now = datetime.now(timezone.utc)
-    return [
-        {
-            "gmail_message_id": f"msg_gm_{uuid.uuid4().hex[:12]}",
-            "sender": "security-alert@google-accounts-verification.net",
-            "subject": "URGENT: Suspicious sign-in attempt blocked on your Google Account",
-            "snippet": "We detected an unauthorized login attempt from Moscow, Russia. Verify your credentials immediately to avoid account suspension.",
-            "received_at": now - timedelta(minutes=14),
-            "raw_eml": f"""From: "Google Identity Security" <security-alert@google-accounts-verification.net>
-To: <{user_email}>
-Subject: URGENT: Suspicious sign-in attempt blocked on your Google Account
-Date: {(now - timedelta(minutes=14)).strftime('%a, %d %b %Y %H:%M:%S +0000')}
-Message-ID: <sec-{uuid.uuid4().hex}@google-accounts-verification.net>
-MIME-Version: 1.0
-Content-Type: text/html; charset=UTF-8
-
-<p>Dear User,</p>
-<p>We recently detected suspicious access attempts to your account <b>{user_email}</b> from IP 185.220.101.5 (Moscow, Russia).</p>
-<p>If this was not you, please immediately confirm your identity at our secured recovery portal:</p>
-<p><a href="http://login-security-update-accounts.servehttp.com/auth/verify?user={user_email}">http://login-security-update-accounts.servehttp.com/auth/verify</a></p>
-<p>Failure to respond within 24 hours will result in permanent account locking.</p>
-<p>Google Cloud Security Operations Team</p>
-""",
-        },
-        {
-            "gmail_message_id": f"msg_gm_{uuid.uuid4().hex[:12]}",
-            "sender": "ceo-direct-office@executives-corp-board.org",
-            "subject": "Confidential: Immediate Wire Transfer Required for Project Alpha",
-            "snippet": "Are you at your desk? I need an urgent payment of $48,500 transferred to our escrow vendor before market close.",
-            "received_at": now - timedelta(hours=1, minutes=30),
-            "raw_eml": f"""From: "Chief Executive Officer" <ceo-direct-office@executives-corp-board.org>
-To: <{user_email}>
-Subject: Confidential: Immediate Wire Transfer Required for Project Alpha
-Date: {(now - timedelta(hours=1, minutes=30)).strftime('%a, %d %b %Y %H:%M:%S +0000')}
-Message-ID: <exec-{uuid.uuid4().hex}@executives-corp-board.org>
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-
-Hi,
-
-Are you at your desk? I am currently in a closed board meeting and cannot take calls.
-We have an urgent transaction for Project Alpha that must be settled today before 4:00 PM EST.
-
-Please wire $48,500 to our acquisition legal counsel using the routing info below. 
-Do not discuss this with anyone in accounting until the public press release tomorrow morning.
-
-Wiring Details:
-Bank: Offshore Commercial Trust
-IBAN: CH930000000000123456789
-Ref: Alpha-Acq-Confidential
-
-Confirm as soon as the transfer slip is generated.
-
-Regards,
-CEO Office
-""",
-        },
-        {
-            "gmail_message_id": f"msg_gm_{uuid.uuid4().hex[:12]}",
-            "sender": "notifications@github.com",
-            "subject": "[GitHub] Successful login from new device (Chrome on Windows)",
-            "snippet": "Your account was logged into from Chrome on Windows (192.168.1.105). If this was you, you can safely ignore this email.",
-            "received_at": now - timedelta(hours=4),
-            "raw_eml": f"""From: "GitHub" <notifications@github.com>
-To: <{user_email}>
-Subject: [GitHub] Successful login from new device (Chrome on Windows)
-Date: {(now - timedelta(hours=4)).strftime('%a, %d %b %Y %H:%M:%S +0000')}
-Message-ID: <gh-{uuid.uuid4().hex}@github.com>
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-
-Hey there!
-
-A new sign-in was detected on your GitHub account:
-- Browser: Chrome 124.0
-- Operating System: Windows 11
-- Location: Rawalpindi, Pakistan
-
-If you recently signed in, no action is needed.
-If you did not initiate this, review your security log at https://github.com/settings/security.
-
-Thanks,
-The GitHub Team
-""",
-        },
-        {
-            "gmail_message_id": f"msg_gm_{uuid.uuid4().hex[:12]}",
-            "sender": "billing-support@quickbooks-invoice-service.cc",
-            "subject": "Overdue Invoice #INV-98231 - Payment Required immediately",
-            "snippet": "Please find attached your updated statement of accounts. Outstanding amount of $3,450.00 is past due.",
-            "received_at": now - timedelta(hours=6, minutes=45),
-            "raw_eml": f"""From: "Intuit Billing Center" <billing-support@quickbooks-invoice-service.cc>
-To: <{user_email}>
-Subject: Overdue Invoice #INV-98231 - Payment Required immediately
-Date: {(now - timedelta(hours=6, minutes=45)).strftime('%a, %d %b %Y %H:%M:%S +0000')}
-Message-ID: <inv-{uuid.uuid4().hex}@quickbooks-invoice-service.cc>
-MIME-Version: 1.0
-Content-Type: text/html; charset=UTF-8
-
-<p>Hello valued customer,</p>
-<p>Your subscription invoice <b>#INV-98231</b> for $3,450.00 is 14 days overdue.</p>
-<p>To view your itemized billing statement and avoid late penalty surcharges, click the secure payment link below:</p>
-<p><a href="http://payment-portal-secure-checkout.ru.com/download/invoice.pdf.exe">https://quickbooks.intuit.com/e-invoices/view?id=98231</a></p>
-<p>Thank you for your prompt business.</p>
-<p>Finance Operations</p>
-""",
-        },
-        {
-            "gmail_message_id": f"msg_gm_{uuid.uuid4().hex[:12]}",
-            "sender": "newsletter@tldr.tech",
-            "subject": "TLDR AI 2026-11-10: Reasoning Models in Cyber Defense",
-            "snippet": "Today's top tech headlines: Autonomous SOC agents, deepfake detection in voice phishing, and multimodal threat triage.",
-            "received_at": now - timedelta(hours=18),
-            "raw_eml": f"""From: "TLDR AI" <newsletter@tldr.tech>
-To: <{user_email}>
-Subject: TLDR AI 2026-11-10: Reasoning Models in Cyber Defense
-Date: {(now - timedelta(hours=18)).strftime('%a, %d %b %Y %H:%M:%S +0000')}
-Message-ID: <tldr-{uuid.uuid4().hex}@tldr.tech>
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-
-TLDR AI - Cyber Security & Autonomous Systems
-
-1. NEW ADVANCEMENTS IN AUTONOMOUS SOC TRIAGE
-Researchers benchmarked real-time phishing pipeline models against 100k malicious attachments with 99.4% precision.
-
-2. OPENAI RELEASES ZERO-DAY HEURISTICS SPEC
-New fine-tuning guidelines allow automated static sandboxes to isolate obfuscated JavaScript payloads.
-
-Read full issue at https://tldr.tech/ai/2026-11-10
-""",
-        },
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -220,75 +87,61 @@ async def _analyze_single_gmail_message_by_id(
     user_id_str: str,
     org_id_str: str,
 ) -> None:
-    """Creates an Email record from GmailMessage raw EML, and kicks off the multi-stage analysis pipeline using an isolated fresh session."""
+    """
+    Executes the genuine 5-stage security analysis pipeline for a single Gmail message.
+    Updates risk scores and classifications directly from the pipeline engine.
+    """
     from app.core.database import AsyncSessionLocal
+    from app.workers.tasks import execute_email_analysis, analyze_email_task
     import uuid
 
     msg_uuid = uuid.UUID(message_id_str)
     user_uuid = uuid.UUID(user_id_str)
     org_uuid = uuid.UUID(org_id_str)
 
+    target_email_id = None
     async with AsyncSessionLocal() as session:
         res = await session.execute(
             select(GmailMessage).where(GmailMessage.id == msg_uuid)
         )
         msg = res.scalar_one_or_none()
-        if not msg or (msg.is_analyzed and msg.analysis_status == "analyzed"):
+        if not msg:
+            return
+
+        if msg.is_analyzed and msg.analysis_status == "analyzed" and msg.email_id:
             return
 
         msg.analysis_status = "processing"
-        raw_eml = msg.raw_eml or ""
-        msg_subj = msg.subject or ""
-        gmail_mid = msg.gmail_message_id
-        await session.commit()
 
-    # Precompute heuristic threat indicators
-    risk_score = 12.0
-    risk_class = "Safe"
-    if "servehttp" in raw_eml or "ru.com" in raw_eml or "invoice.pdf.exe" in raw_eml:
-        risk_score = 96.0
-        risk_class = "Critical"
-    elif "Immediate Wire" in msg_subj or "Wire Transfer" in msg_subj:
-        risk_score = 84.0
-        risk_class = "Suspicious"
-    elif "MFA Update" in msg_subj or "authportal" in raw_eml:
-        risk_score = 89.0
-        risk_class = "Critical"
-
-    # Create root Email record in fresh session
-    created_email_id = None
-    try:
-        async with AsyncSessionLocal() as session:
+        if msg.email_id:
+            target_email_id = msg.email_id
+        else:
+            raw_eml = msg.raw_eml or ""
             email_record = Email(
                 id=uuid.uuid4(),
                 organization_id=org_uuid,
                 submitted_by=user_uuid,
-                original_filename=f"gmail_{gmail_mid}.eml",
+                original_filename=f"gmail_{msg.gmail_message_id}.eml",
                 source_type="gmail_sync",
                 file_size_bytes=len(raw_eml.encode("utf-8")),
                 raw_content=raw_eml,
-                analysis_status="completed",
+                analysis_status="pending",
+                received_at=msg.received_at,
+                subject=msg.subject,
+                sender_raw=msg.sender,
             )
             session.add(email_record)
-            await session.commit()
-            created_email_id = email_record.id
-    except Exception as e:
-        logger.warning("Failed to create root email record for gmail message: %s", e)
+            await session.flush()
+            msg.email_id = email_record.id
+            target_email_id = email_record.id
 
-    # Update GmailMessage with score & status
-    async with AsyncSessionLocal() as session:
-        res = await session.execute(
-            select(GmailMessage).where(GmailMessage.id == msg_uuid)
-        )
-        msg = res.scalar_one_or_none()
-        if msg:
-            msg.is_analyzed = True
-            msg.analysis_status = "analyzed"
-            msg.risk_score = risk_score
-            msg.risk_classification = risk_class
-            if created_email_id:
-                msg.email_id = created_email_id
-            await session.commit()
+        await session.commit()
+
+    if target_email_id:
+        try:
+            analyze_email_task.delay(str(target_email_id), str(org_uuid))
+        except Exception:
+            await execute_email_analysis(str(target_email_id), str(org_uuid))
 
 
 
@@ -601,38 +454,6 @@ async def connect_gmail(
     await db.commit()
     await db.refresh(integration)
 
-    # Seed messages if inbox is empty
-    existing_msgs = await db.execute(
-        select(func.count(GmailMessage.id)).where(GmailMessage.integration_id == integration.id)
-    )
-    if (existing_msgs.scalar_one() or 0) == 0 and payload.sync_demo_inbox:
-        seed_data = _generate_seed_gmail_messages(payload.email_address)
-        new_msgs: List[GmailMessage] = []
-        for item in seed_data:
-            gmsg = GmailMessage(
-                id=uuid.uuid4(),
-                organization_id=current_user.organization_id,
-                user_id=current_user.id,
-                integration_id=integration.id,
-                gmail_message_id=item["gmail_message_id"],
-                subject=item["subject"],
-                sender=item["sender"],
-                snippet=item["snippet"],
-                raw_eml=item["raw_eml"],
-                received_at=item["received_at"],
-                is_analyzed=False,
-                analysis_status="pending",
-            )
-            db.add(gmsg)
-            new_msgs.append(gmsg)
-        await db.commit()
-
-        if payload.auto_analyze:
-            for gmsg in new_msgs:
-                asyncio.create_task(_analyze_single_gmail_message_by_id(
-                    str(gmsg.id), str(current_user.id), str(current_user.organization_id)
-                ))
-
     return success_response({
         "message": f"Successfully connected Gmail account ({payload.email_address})",
         "email_address": payload.email_address,
@@ -833,10 +654,15 @@ async def analyze_all_pending_messages(
 
 @router.post("/sync")
 async def sync_gmail_inbox(
+    max_messages: int = Query(20, ge=1, le=50, description="Max messages to retrieve in this sync (bounded concurrency)"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Syncs new incoming emails from Gmail and triggers auto-analyze if configured."""
+    """
+    Syncs new incoming emails from Gmail INBOX using genuine Google Gmail REST API.
+    Enforces INBOX-only listing, lossless RFC-822 MIME retrieval, and idempotency.
+    Triggers automated pipeline analysis if auto_analyze is enabled.
+    """
     res = await db.execute(
         select(GmailIntegration).where(
             GmailIntegration.organization_id == current_user.organization_id,
@@ -846,62 +672,101 @@ async def sync_gmail_inbox(
     )
     integration = res.scalar_one_or_none()
     if not integration:
-        raise HTTPException(status_code=400, detail="No connected Gmail account found")
-
-    integration.last_synced_at = datetime.now(timezone.utc)
-    await db.commit()
-
-    # Generate a fresh live simulated incoming message if fewer than 10 exist
-    count_res = await db.execute(
-        select(func.count(GmailMessage.id)).where(GmailMessage.integration_id == integration.id)
-    )
-    curr_count = count_res.scalar_one() or 0
-
-    new_msg_id = None
-    if curr_count < 10:
-        now = datetime.now(timezone.utc)
-        new_msg = GmailMessage(
-            id=uuid.uuid4(),
-            organization_id=current_user.organization_id,
-            user_id=current_user.id,
-            integration_id=integration.id,
-            gmail_message_id=f"msg_gm_{uuid.uuid4().hex[:12]}",
-            subject="Action Required: IT Security Policy Compliance & MFA Update",
-            sender="helpdesk-compliance@corporate-authportal.net",
-            snippet="All employees must complete mandatory 2026 cybersecurity training and sync their MFA hardware key.",
-            raw_eml=f"""From: "Enterprise IT SecOps" <helpdesk-compliance@corporate-authportal.net>
-To: <{integration.email_address}>
-Subject: Action Required: IT Security Policy Compliance & MFA Update
-Date: {now.strftime('%a, %d %b %Y %H:%M:%S +0000')}
-Message-ID: <sec-{uuid.uuid4().hex}@corporate-authportal.net>
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-
-Dear Employee,
-
-As part of ISO 27001 annual compliance, all active workstations must verify their authentication profile:
-https://corporate-authportal.net/login/sso-verification
-
-Please submit verification before 5:00 PM today to avoid SSO suspension.
-
-Enterprise Information Security
-""",
-            received_at=now,
-            is_analyzed=False,
-            analysis_status="pending",
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No connected Gmail account found. Please connect your Gmail account via OAuth first."
         )
-        db.add(new_msg)
-        await db.commit()
-        await db.refresh(new_msg)
-        new_msg_id = str(new_msg.id)
 
-        if integration.auto_analyze_enabled:
-            asyncio.create_task(_analyze_single_gmail_message_by_id(
-                new_msg_id, str(current_user.id), str(current_user.organization_id)
-            ))
+    try:
+        result = await gmail_client_service.sync_inbox(
+            db=db,
+            user=current_user,
+            integration=integration,
+            max_messages=max_messages,
+            is_initial_scan=False,
+            consent_acknowledged=False,
+        )
+        return success_response(result)
+    except GoogleTokenRevokedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Gmail authorization has expired or was revoked. Please reconnect your account: {e}",
+        )
+    except GmailPermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
+    except GmailRateLimitError as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e),
+        )
+    except GmailAPIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Google Gmail API error: {e}",
+        )
 
-    return success_response({
-        "message": "Gmail inbox sync completed",
-        "synced_at": integration.last_synced_at.isoformat(),
-        "new_email_received": new_msg_id is not None,
-    })
+
+@router.post("/initial-scan")
+async def initial_inbox_scan(
+    payload: InitialScanRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Performs an initial historical scan of the user's Gmail INBOX.
+    MANDATORY REQUIREMENT: Requires explicit user consent (consent_acknowledged=True).
+    Without explicit consent, returns 400 Bad Request.
+    """
+    if not payload.consent_acknowledged:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Explicit user consent is required before performing an initial scan of historical emails.",
+        )
+
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No connected Gmail account found. Please connect your Gmail account via OAuth first."
+        )
+
+    try:
+        result = await gmail_client_service.sync_inbox(
+            db=db,
+            user=current_user,
+            integration=integration,
+            max_messages=payload.max_messages,
+            is_initial_scan=True,
+            consent_acknowledged=payload.consent_acknowledged,
+        )
+        return success_response(result)
+    except GoogleTokenRevokedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Gmail authorization has expired or was revoked. Please reconnect your account: {e}",
+        )
+    except GmailPermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
+    except GmailRateLimitError as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e),
+        )
+    except GmailAPIError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Google Gmail API error: {e}",
+        )

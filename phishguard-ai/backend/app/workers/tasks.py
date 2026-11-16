@@ -355,6 +355,19 @@ async def execute_email_analysis(email_id: str, organization_id: str) -> None:
                 session.add(ioc_record)
 
             email_record.analysis_status = "complete"
+
+            # If linked to a GmailMessage, update the GmailMessage with verified pipeline risk metrics
+            from app.models import GmailMessage
+            gmail_msg_res = await session.execute(
+                select(GmailMessage).where(GmailMessage.email_id == email_record.id)
+            )
+            gmsg = gmail_msg_res.scalar_one_or_none()
+            if gmsg:
+                gmsg.is_analyzed = True
+                gmsg.analysis_status = "analyzed"
+                gmsg.risk_score = score_result.score
+                gmsg.risk_classification = score_result.risk_classification
+
             await session.commit()
             logger.info("analysis_completed_successfully for %s, risk_score=%s", email_id, score_result.score)
 
@@ -362,9 +375,15 @@ async def execute_email_analysis(email_id: str, organization_id: str) -> None:
             logger.error("analysis_pipeline_failed for %s: %s", email_id, str(e), exc_info=True)
             await session.rollback()
             try:
+                from app.models import GmailMessage
                 await session.execute(
                     update(Email)
                     .where(Email.id == uuid.UUID(email_id))
+                    .values(analysis_status="failed")
+                )
+                await session.execute(
+                    update(GmailMessage)
+                    .where(GmailMessage.email_id == uuid.UUID(email_id))
                     .values(analysis_status="failed")
                 )
                 await session.commit()
@@ -380,3 +399,70 @@ def analyze_email_task(self, email_id: str, organization_id: str):
     except Exception as exc:
         logger.error("celery_task_error for %s: %s", email_id, str(exc))
         raise self.retry(exc=exc, countdown=10)
+
+
+async def execute_gmail_sync(
+    integration_id: str,
+    user_id: str,
+    organization_id: str,
+    max_messages: int = 20,
+    is_initial_scan: bool = False,
+    consent_acknowledged: bool = False,
+) -> dict:
+    """Executes asynchronous Gmail inbox sync."""
+    from app.services.gmail_client_service import gmail_client_service
+    from app.models import GmailIntegration, User
+
+    async with AsyncSessionLocal() as session:
+        int_res = await session.execute(
+            select(GmailIntegration).where(
+                GmailIntegration.id == uuid.UUID(integration_id),
+                GmailIntegration.organization_id == uuid.UUID(organization_id),
+            )
+        )
+        integration = int_res.scalar_one_or_none()
+        if not integration or not integration.is_connected:
+            return {"status": "skipped", "reason": "Integration not active"}
+
+        user_res = await session.execute(
+            select(User).where(User.id == uuid.UUID(user_id))
+        )
+        user = user_res.scalar_one_or_none()
+        if not user:
+            return {"status": "error", "reason": "User not found"}
+
+        return await gmail_client_service.sync_inbox(
+            db=session,
+            user=user,
+            integration=integration,
+            max_messages=max_messages,
+            is_initial_scan=is_initial_scan,
+            consent_acknowledged=consent_acknowledged,
+        )
+
+
+@celery_app.task(name="app.workers.tasks.sync_gmail_account_task", bind=True, max_retries=3, default_retry_delay=15)
+def sync_gmail_account_task(
+    self,
+    integration_id: str,
+    user_id: str,
+    organization_id: str,
+    max_messages: int = 20,
+    is_initial_scan: bool = False,
+    consent_acknowledged: bool = False,
+):
+    """Celery background worker task for syncing Gmail inbox messages."""
+    try:
+        return asyncio.run(
+            execute_gmail_sync(
+                integration_id=integration_id,
+                user_id=user_id,
+                organization_id=organization_id,
+                max_messages=max_messages,
+                is_initial_scan=is_initial_scan,
+                consent_acknowledged=consent_acknowledged,
+            )
+        )
+    except Exception as exc:
+        logger.error("sync_gmail_account_task error: %s", exc)
+        raise self.retry(exc=exc, countdown=15 * (2 ** self.request.retries))
