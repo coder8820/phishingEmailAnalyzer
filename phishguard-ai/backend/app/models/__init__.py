@@ -606,11 +606,26 @@ class GmailIntegration(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     email_address = Column(String(255), nullable=False)
     is_connected = Column(Boolean, default=True, nullable=False)
+    connection_status = Column(String(50), default="connected", nullable=False)  # connected | disconnected | error | revoked
+    token_status = Column(String(50), default="valid", nullable=False)            # valid | expired | revoked | invalid
+    refresh_token_encrypted = Column(BYTEA, nullable=True)                       # AES-128/Fernet encrypted at rest
+    access_token_encrypted = Column(BYTEA, nullable=True)                        # AES-128/Fernet encrypted at rest
+    token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    granted_scopes = Column(JSONB, nullable=True, default=list)
     auto_analyze_enabled = Column(Boolean, default=True, nullable=False)
-    auth_type = Column(String(50), default="oauth_sync", nullable=False)  # oauth_sync | app_password | live_sync
+    auth_type = Column(String(50), default="oauth2", nullable=False)             # oauth2 | app_password | live_sync
+    connected_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_verified_at = Column(DateTime(timezone=True), nullable=True)
+    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    last_history_id = Column(String(64), nullable=True)
+    quarantine_label_id = Column(String(100), nullable=True)
+    watch_expiration = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    # Deprecated plaintext columns retained for backward migration compatibility
     access_token = Column(Text, nullable=True)
     refresh_token = Column(Text, nullable=True)
-    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = now_utc()
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -619,6 +634,25 @@ class GmailIntegration(Base):
 
     __table_args__ = (
         Index("idx_gmail_org_user", "organization_id", "user_id"),
+        Index("idx_gmail_email", "email_address"),
+        UniqueConstraint("organization_id", "email_address", name="uq_gmail_org_email"),
+    )
+
+
+class OAuthState(Base):
+    __tablename__ = "oauth_states"
+
+    id = uuid_pk()
+    state = Column(String(128), unique=True, nullable=False, index=True)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    code_verifier = Column(String(128), nullable=True)
+    redirect_uri = Column(String(512), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = now_utc()
+
+    __table_args__ = (
+        Index("idx_oauth_state_lookup", "state"),
     )
 
 
