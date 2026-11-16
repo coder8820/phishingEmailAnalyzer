@@ -20,6 +20,10 @@ os.environ["POSTGRES_PASSWORD"] = "testpass"
 os.environ["AI_PROVIDER"] = "mock"
 os.environ["TI_DEMO_MODE"] = "true"
 os.environ["ENCRYPTION_KEY"] = "dGVzdC1lbmNyeXB0aW9uLWtleS1mb3ItdGVzdA=="
+os.environ["TOKEN_ENCRYPTION_KEY"] = "k8F2j9pL4mN6qR8sT1uV3wX5yZ7aB9cD1eF3gH5iJ7k="
+os.environ["GOOGLE_CLIENT_ID"] = "test-google-client-id.apps.googleusercontent.com"
+os.environ["GOOGLE_CLIENT_SECRET"] = "test-google-client-secret"
+os.environ["GOOGLE_REDIRECT_URI"] = "http://localhost:3001/integrations/gmail/callback"
 os.environ["ALLOWED_ORIGINS"] = '["http://localhost:3001","http://localhost:3000","http://localhost:80"]'
 
 from app.core.config import get_settings
