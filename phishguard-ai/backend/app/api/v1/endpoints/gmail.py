@@ -14,13 +14,24 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, update, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
+from urllib.parse import quote_plus
 
+from app.core.config import settings
 from app.core.database import get_db
-from app.models import GmailIntegration, GmailMessage, Email, User
+from app.models import GmailIntegration, GmailMessage, Email, User, OAuthState
 from app.security.auth import get_current_user
+from app.services.gmail_oauth_service import (
+    gmail_oauth_service,
+    GoogleOAuthConfigurationError,
+    GoogleOAuthError,
+    GoogleOAuthCSRFError,
+    GmailAccountConflictError,
+    GoogleTokenRevokedError,
+)
 from app.workers.tasks import execute_email_analysis
 from app.utils.response import success_response, error_response
 
@@ -38,6 +49,17 @@ class ConnectGmailRequest(BaseModel):
     app_password: Optional[str] = None
     auto_analyze: bool = True
     sync_demo_inbox: bool = True
+
+
+class InitiateOAuthRequest(BaseModel):
+    redirect_uri: Optional[str] = None
+
+
+class OAuthCallbackRequest(BaseModel):
+    code: Optional[str] = None
+    state: Optional[str] = None
+    error: Optional[str] = None
+    redirect_uri: Optional[str] = None
 
 
 class ToggleAutoAnalyzeRequest(BaseModel):
