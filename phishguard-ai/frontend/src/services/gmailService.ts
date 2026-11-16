@@ -2,7 +2,12 @@ import { apiClient } from '@/lib/api'
 
 export interface GmailStatus {
   is_connected: boolean
+  connection_status?: string
+  token_status?: string
   email_address: string | null
+  granted_scopes?: string[]
+  last_verified_at?: string | null
+  last_error?: string | null
   auto_analyze_enabled: boolean
   auth_type?: string
   total_messages: number
@@ -10,6 +15,30 @@ export interface GmailStatus {
   pending_messages: number
   critical_threats: number
   last_synced_at: string | null
+}
+
+export interface GoogleOAuthInitiateResponse {
+  authorization_url: string
+  state: string
+}
+
+export interface ConnectedAccountItem {
+  id: string
+  email_address: string
+  is_connected: boolean
+  connection_status: string
+  token_status: string
+  granted_scopes: string[]
+  connected_at: string | null
+  last_verified_at: string | null
+  last_synced_at: string | null
+  last_error: string | null
+  auto_analyze_enabled: boolean
+}
+
+export interface ConnectedAccountsResponse {
+  accounts: ConnectedAccountItem[]
+  total: number
 }
 
 export interface GmailMessageItem {
@@ -35,6 +64,31 @@ export interface GmailMessagesResponse {
 
 export async function getGmailStatus(): Promise<GmailStatus> {
   const { data } = await apiClient.get('/gmail/status')
+  return data.data
+}
+
+export async function getGoogleOAuthUrl(redirectUri?: string): Promise<GoogleOAuthInitiateResponse> {
+  const params = redirectUri ? `?redirect_uri=${encodeURIComponent(redirectUri)}` : ''
+  const { data } = await apiClient.get(`/gmail/oauth/authorize${params}`)
+  return data.data
+}
+
+export async function handleGoogleOAuthCallback(payload: {
+  code?: string
+  state?: string
+  error?: string
+}): Promise<any> {
+  const { data } = await apiClient.post('/gmail/oauth/callback', payload)
+  return data.data
+}
+
+export async function getConnectedGmailAccounts(): Promise<ConnectedAccountsResponse> {
+  const { data } = await apiClient.get('/gmail/accounts')
+  return data.data
+}
+
+export async function disconnectGmailAccountById(accountId: string): Promise<any> {
+  const { data } = await apiClient.post(`/gmail/accounts/${accountId}/disconnect`)
   return data.data
 }
 

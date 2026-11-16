@@ -27,7 +27,7 @@ import { toast } from 'sonner'
 import {
   getGmailStatus,
   getGmailMessages,
-  connectGmail,
+  getGoogleOAuthUrl,
   disconnectGmail,
   toggleAutoAnalyze,
   syncGmailInbox,
@@ -53,12 +53,26 @@ export function GmailDefenseHub() {
   const [threatFilter, setThreatFilter] = useState<'all' | 'safe' | 'suspicious' | 'critical'>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'analyzed' | 'pending'>('all')
 
-  // Connect Modal state
-  const [isConnectModalOpen, setIsConnectModalOpen] = useState(false)
-  const [connectEmail, setConnectEmail] = useState('')
-  const [appPassword, setAppPassword] = useState('')
-  const [connectAutoAnalyze, setConnectAutoAnalyze] = useState(true)
-  const [connecting, setConnecting] = useState(false)
+  // Real Google OAuth 2.0 flow states
+  const [isStartingOAuth, setIsStartingOAuth] = useState(false)
+  const [configError, setConfigError] = useState<string | null>(null)
+
+  // Check URL query parameters on return from backend callback
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const urlParams = new URLSearchParams(window.location.search)
+      if (urlParams.get('gmail_connected') === 'true') {
+        const email = urlParams.get('email')
+        toast.success(`Google Account successfully connected and verified! ${email ? `(${email})` : ''}`)
+        window.history.replaceState({}, document.title, window.location.pathname)
+        loadData()
+      } else if (urlParams.get('gmail_error')) {
+        const error = urlParams.get('gmail_error')
+        toast.error(`Google Connection Error: ${error}`)
+        window.history.replaceState({}, document.title, window.location.pathname)
+      }
+    }
+  }, [])
 
   // Fetch Status and Messages
   const loadData = async (silent = false) => {
@@ -101,37 +115,31 @@ export function GmailDefenseHub() {
     return () => clearTimeout(handler)
   }, [search])
 
-  const handleConnect = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!connectEmail || !connectEmail.includes('@')) {
-      toast.error('Please enter a valid Gmail address')
-      return
-    }
-    setConnecting(true)
+  const handleStartGoogleOAuth = async () => {
+    setIsStartingOAuth(true)
+    setConfigError(null)
     try {
-      await connectGmail({
-        email_address: connectEmail,
-        app_password: appPassword || undefined,
-        auto_analyze: connectAutoAnalyze,
-        sync_demo_inbox: true,
-      })
-      toast.success(`Successfully connected ${connectEmail}`)
-      setIsConnectModalOpen(false)
-      setConnectEmail('')
-      setAppPassword('')
-      await loadData()
+      const res = await getGoogleOAuthUrl()
+      if (res.authorization_url) {
+        toast.info('Redirecting to Google Identity Services...')
+        window.location.href = res.authorization_url
+      } else {
+        toast.error('Invalid response from Google OAuth service')
+      }
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to connect Gmail')
+      const detail = err.response?.data?.detail || err.message || 'Failed to initiate Google OAuth'
+      setConfigError(detail)
+      toast.error(detail)
     } finally {
-      setConnecting(false)
+      setIsStartingOAuth(false)
     }
   }
 
   const handleDisconnect = async () => {
-    if (!confirm('Are you sure you want to disconnect your Gmail integration?')) return
+    if (!confirm('Are you sure you want to disconnect your Gmail integration and revoke Google OAuth access?')) return
     try {
       await disconnectGmail()
-      toast.success('Gmail account disconnected')
+      toast.success('Gmail account disconnected and Google OAuth grant revoked')
       await loadData()
     } catch (err: any) {
       toast.error('Failed to disconnect Gmail')
@@ -213,10 +221,18 @@ export function GmailDefenseHub() {
                 Connected Gmail Defense Hub
               </h2>
               {status?.is_connected ? (
-                <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  Active: {status.email_address}
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Active: {status.email_address}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-navy-800 text-slate-300 border border-navy-700">
+                    Scope: gmail.modify
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    Token: {status.token_status || 'valid'}
+                  </span>
+                </div>
               ) : (
                 <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono bg-slate-500/15 text-slate-400 border border-slate-600/30">
                   Disconnected
@@ -288,18 +304,28 @@ export function GmailDefenseHub() {
               <button
                 onClick={handleDisconnect}
                 className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded-xl border border-transparent hover:border-red-500/30 transition-colors"
-                title="Disconnect Gmail Account"
+                title="Disconnect Gmail Account & Revoke OAuth"
               >
                 <Power className="w-4 h-4" />
               </button>
             </>
           ) : (
             <button
-              onClick={() => setIsConnectModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white rounded-xl text-xs font-mono font-semibold shadow-lg shadow-red-600/25 transition-all"
+              onClick={handleStartGoogleOAuth}
+              disabled={isStartingOAuth}
+              className="flex items-center gap-2 px-4 py-2.5 bg-white hover:bg-slate-100 text-slate-900 rounded-xl text-xs font-mono font-semibold shadow-lg shadow-white/10 transition-all cursor-pointer disabled:opacity-60"
             >
-              <Mail className="w-4 h-4" />
-              <span>Connect Gmail Account</span>
+              {isStartingOAuth ? (
+                <RefreshCw className="w-4 h-4 animate-spin text-slate-700" />
+              ) : (
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                </svg>
+              )}
+              <span>{isStartingOAuth ? 'Redirecting to Google...' : 'Connect with Google'}</span>
             </button>
           )}
         </div>
@@ -517,106 +543,56 @@ export function GmailDefenseHub() {
           </div>
         </div>
       ) : (
-        /* Disconnected Hero Call-to-Action */
+        /* Disconnected Hero Call-to-Action with Genuine Google OAuth 2.0 */
         <div className="mt-6 p-8 border border-navy-700/60 rounded-xl bg-navy-850/40 text-center flex flex-col items-center justify-center">
           <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 mb-4 shadow-lg shadow-red-500/5">
             <Shield className="w-8 h-8" />
           </div>
           <h3 className="text-lg font-bold text-white font-mono">
-            Connect Your Gmail Account For Continuous Defense
+            Connect Your Gmail Account with Official Google OAuth 2.0
           </h3>
-          <p className="text-xs text-slate-400 max-w-md mt-1.5 leading-relaxed">
-            Link your Google Workspace or personal Gmail inbox to monitor incoming emails, automatically
-            detonate malicious payloads, verify sender SPF/DKIM/DMARC authenticity, and quarantine zero-day phishing threats.
+          <p className="text-xs text-slate-400 max-w-lg mt-1.5 leading-relaxed">
+            Link your Google account securely via Google's official consent screen. PhishGuard requests the least-privilege
+            <code className="text-accent-blue bg-navy-900 px-1 py-0.5 rounded mx-1">gmail.modify</code>
+            scope for inspection and quarantine. All refresh tokens are AES-128 encrypted at rest.
           </p>
 
-          <button
-            onClick={() => setIsConnectModalOpen(true)}
-            className="mt-6 flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white rounded-xl text-xs font-mono font-semibold shadow-lg shadow-red-600/30 transition-all cursor-pointer"
-          >
-            <Mail className="w-4 h-4" />
-            <span>Connect Gmail Now</span>
-          </button>
-        </div>
-      )}
-
-      {/* Connect Modal */}
-      {isConnectModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-navy-850 border border-navy-700 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
-            <div className="flex items-center gap-3 pb-4 border-b border-navy-700">
-              <div className="p-2.5 bg-red-500/15 border border-red-500/30 rounded-xl text-red-400">
-                <Mail className="w-5 h-5" />
+          {configError && (
+            <div className="mt-4 p-4 max-w-md w-full bg-red-500/10 border border-red-500/30 rounded-xl text-left space-y-1.5">
+              <div className="flex items-center gap-2 text-red-400 font-semibold font-mono text-xs">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>Google OAuth Configuration Missing</span>
               </div>
-              <div>
-                <h3 className="text-base font-bold text-white font-mono">Connect Gmail Inbox</h3>
-                <p className="text-xs text-slate-400">Authorize automated phishing inspection</p>
-              </div>
+              <p className="text-[11px] text-red-300 font-mono leading-relaxed">
+                {configError}
+              </p>
+              <p className="text-[10px] text-slate-400 font-mono pt-1">
+                Configure <code className="text-white">GOOGLE_CLIENT_ID</code> and <code className="text-white">GOOGLE_CLIENT_SECRET</code> in <code className="text-white">backend/.env</code>.
+              </p>
             </div>
+          )}
 
-            <form onSubmit={handleConnect} className="mt-4 space-y-4 text-xs font-mono">
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Gmail Address <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="email"
-                  required
-                  placeholder="e.g. yourname@gmail.com"
-                  value={connectEmail}
-                  onChange={(e) => setConnectEmail(e.target.value)}
-                  className="w-full bg-navy-900 border border-navy-700 rounded-lg p-2.5 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-accent-blue"
-                />
-              </div>
+          <button
+            onClick={handleStartGoogleOAuth}
+            disabled={isStartingOAuth}
+            className="mt-6 flex items-center gap-2.5 px-6 py-3 bg-white hover:bg-slate-100 text-slate-900 rounded-xl text-xs font-mono font-bold shadow-xl shadow-white/10 transition-all cursor-pointer disabled:opacity-50"
+          >
+            {isStartingOAuth ? (
+              <RefreshCw className="w-4 h-4 animate-spin text-slate-700" />
+            ) : (
+              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+              </svg>
+            )}
+            <span>{isStartingOAuth ? 'Redirecting to Google...' : 'Sign in & Connect with Google'}</span>
+          </button>
 
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Google App Password <span className="text-slate-500 font-normal">(Optional for Direct IMAP)</span>
-                </label>
-                <input
-                  type="password"
-                  placeholder="16-character Google App Password (optional)"
-                  value={appPassword}
-                  onChange={(e) => setAppPassword(e.target.value)}
-                  className="w-full bg-navy-900 border border-navy-700 rounded-lg p-2.5 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-accent-blue"
-                />
-                <p className="text-[10px] text-slate-400 mt-1">
-                  If left blank, PhishGuard AI connects securely via OAuth Sandbox Sync.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2.5 pt-2">
-                <input
-                  type="checkbox"
-                  id="auto_analyze_box"
-                  checked={connectAutoAnalyze}
-                  onChange={(e) => setConnectAutoAnalyze(e.target.checked)}
-                  className="w-4 h-4 rounded bg-navy-900 border-navy-700 text-accent-blue focus:ring-0"
-                />
-                <label htmlFor="auto_analyze_box" className="text-slate-300 cursor-pointer text-xs">
-                  Enable <span className="text-accent-blue font-bold">Auto-Analyze</span> on all incoming emails
-                </label>
-              </div>
-
-              <div className="pt-4 flex items-center justify-end gap-2.5 border-t border-navy-700">
-                <button
-                  type="button"
-                  onClick={() => setIsConnectModalOpen(false)}
-                  className="px-4 py-2 bg-navy-800 hover:bg-navy-700 text-slate-300 rounded-lg transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={connecting}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-red-600 hover:bg-red-500 text-white font-bold rounded-lg shadow-lg shadow-red-600/20 transition-all disabled:opacity-50"
-                >
-                  {connecting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  <span>{connecting ? 'Connecting...' : 'Authorize & Connect'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
+          <p className="text-[10px] text-slate-500 font-mono mt-3">
+            Offline access enabled for autonomous background monitoring & quarantine.
+          </p>
         </div>
       )}
     </div>
