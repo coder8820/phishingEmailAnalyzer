@@ -70,7 +70,7 @@ async def test_list_inbox_messages_parameters(db_session):
         user_id=uuid.uuid4(),
         email_address="victim@company.com",
         is_connected=True,
-        encrypted_refresh_token=b"encrypted_token",
+        refresh_token_encrypted=b"encrypted_token",
     )
 
     client_service = GmailClientService()
@@ -114,7 +114,7 @@ async def test_get_message_raw_rejects_non_inbox(db_session):
         user_id=uuid.uuid4(),
         email_address="victim@company.com",
         is_connected=True,
-        encrypted_refresh_token=b"encrypted_token",
+        refresh_token_encrypted=b"encrypted_token",
     )
 
     client_service = GmailClientService()
@@ -185,7 +185,7 @@ async def test_initial_scan_requires_explicit_consent(db_session):
         user_id=user.id,
         email_address="analyst@company.com",
         is_connected=True,
-        encrypted_refresh_token=b"encrypted_token",
+        refresh_token_encrypted=b"encrypted_token",
     )
 
     client_service = GmailClientService()
@@ -229,7 +229,7 @@ async def test_sync_inbox_idempotency(db_session):
         email_address="user_idempotency@company.com",
         is_connected=True,
         auto_analyze_enabled=False,
-        encrypted_refresh_token=b"encrypted_token",
+        refresh_token_encrypted=b"encrypted_token",
     )
     db_session.add(integration)
     await db_session.commit()
@@ -324,7 +324,7 @@ async def test_token_refresh_on_401(db_session):
         user_id=uuid.uuid4(),
         email_address="refresh_test@company.com",
         is_connected=True,
-        encrypted_refresh_token=b"encrypted_token",
+        refresh_token_encrypted=b"encrypted_token",
     )
 
     client_service = GmailClientService()
@@ -374,7 +374,7 @@ async def test_permission_denied_on_403(db_session):
         user_id=uuid.uuid4(),
         email_address="perm_test@company.com",
         is_connected=True,
-        encrypted_refresh_token=b"encrypted_token",
+        refresh_token_encrypted=b"encrypted_token",
     )
 
     client_service = GmailClientService()
@@ -439,7 +439,7 @@ async def test_tenant_isolation_on_sync(db_session):
         user_id=user_a.id,
         email_address="analyst@tenant-a.com",
         is_connected=True,
-        encrypted_refresh_token=b"encrypted_token",
+        refresh_token_encrypted=b"encrypted_token",
     )
     db_session.add(int_a)
     await db_session.commit()
