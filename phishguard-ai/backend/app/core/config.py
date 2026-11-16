@@ -88,6 +88,18 @@ class Settings(BaseSettings):
 
     # --- Encryption Key (for API keys at rest) ---
     ENCRYPTION_KEY: str = ""
+    TOKEN_ENCRYPTION_KEY: str = ""  # If empty, defaults to ENCRYPTION_KEY
+
+    # --- Google OAuth 2.0 & Gmail Integration ---
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:3001/integrations/gmail/callback"
+    FRONTEND_URL: str = "http://localhost:3001"
+    BACKEND_PUBLIC_URL: str = "http://localhost:8000"
+
+    @property
+    def EFFECTIVE_TOKEN_ENCRYPTION_KEY(self) -> str:
+        return self.TOKEN_ENCRYPTION_KEY.strip() if self.TOKEN_ENCRYPTION_KEY else self.ENCRYPTION_KEY.strip()
 
     # --- SMTP (optional) ---
     SMTP_HOST: str = ""
