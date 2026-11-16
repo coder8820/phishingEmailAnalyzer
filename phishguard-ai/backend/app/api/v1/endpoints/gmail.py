@@ -301,7 +301,7 @@ async def get_gmail_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Returns current Gmail connection state, auto-analyze flag, and message stats."""
+    """Returns current Gmail connection state, OAuth credentials status, and message stats."""
     res = await db.execute(
         select(GmailIntegration).where(
             GmailIntegration.organization_id == current_user.organization_id,
@@ -313,7 +313,12 @@ async def get_gmail_status(
     if not integration or not integration.is_connected:
         return success_response({
             "is_connected": False,
-            "email_address": None,
+            "connection_status": "disconnected" if not integration else integration.connection_status,
+            "token_status": "none" if not integration else integration.token_status,
+            "email_address": integration.email_address if integration else None,
+            "granted_scopes": integration.granted_scopes if integration else [],
+            "last_verified_at": integration.last_verified_at.isoformat() if integration and integration.last_verified_at else None,
+            "last_error": integration.last_error if integration else None,
             "auto_analyze_enabled": False,
             "total_messages": 0,
             "analyzed_messages": 0,
@@ -347,8 +352,13 @@ async def get_gmail_status(
     critical_msgs = critical_q.scalar_one() or 0
 
     return success_response({
-        "is_connected": True,
+        "is_connected": integration.is_connected,
+        "connection_status": integration.connection_status,
+        "token_status": integration.token_status,
         "email_address": integration.email_address,
+        "granted_scopes": integration.granted_scopes or [],
+        "last_verified_at": integration.last_verified_at.isoformat() if integration.last_verified_at else None,
+        "last_error": integration.last_error,
         "auto_analyze_enabled": integration.auto_analyze_enabled,
         "auth_type": integration.auth_type,
         "total_messages": total_msgs,
@@ -359,6 +369,194 @@ async def get_gmail_status(
     })
 
 
+@router.get("/oauth/authorize")
+@router.post("/oauth/initiate")
+async def start_google_oauth(
+    redirect_uri: Optional[str] = Query(None),
+    payload: Optional[InitiateOAuthRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Initiates official Google OAuth 2.0 Web Server flow with PKCE and one-time CSRF state.
+    Returns authorization URL for redirecting the user's browser to Google.
+    """
+    effective_redirect_uri = (payload.redirect_uri if payload else None) or redirect_uri
+    try:
+        auth_url, state = await gmail_oauth_service.create_authorization_url(
+            db=db,
+            user=current_user,
+            custom_redirect_uri=effective_redirect_uri,
+        )
+        return success_response({
+            "authorization_url": auth_url,
+            "state": state,
+        })
+    except GoogleOAuthConfigurationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.exception("Failed to initiate Google OAuth: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to initiate Google OAuth authorization: {str(e)}",
+        )
+
+
+@router.post("/oauth/callback")
+async def handle_google_oauth_callback(
+    payload: OAuthCallbackRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Processes OAuth 2.0 callback from Google.
+    Exchanges code for tokens, verifies account via users.getProfile,
+    encrypts tokens at rest, and associates connection with current user.
+    """
+    try:
+        integration = await gmail_oauth_service.exchange_code_and_verify_account(
+            db=db,
+            user=current_user,
+            code=payload.code or "",
+            state=payload.state or "",
+            error=payload.error,
+        )
+        return success_response({
+            "message": f"Successfully connected and verified Gmail account ({integration.email_address})",
+            "id": str(integration.id),
+            "email_address": integration.email_address,
+            "is_connected": integration.is_connected,
+            "connection_status": integration.connection_status,
+            "token_status": integration.token_status,
+            "granted_scopes": integration.granted_scopes,
+            "last_verified_at": integration.last_verified_at.isoformat() if integration.last_verified_at else None,
+        })
+    except GoogleOAuthConfigurationError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+    except GoogleOAuthCSRFError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except GmailAccountConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except GoogleOAuthError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.exception("Unexpected error during Google OAuth callback: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"OAuth callback processing failed: {str(e)}",
+        )
+
+
+@router.get("/oauth/callback")
+async def handle_google_oauth_browser_redirect(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Direct browser callback endpoint when redirect_uri points to backend.
+    Validates state to locate user, performs exchange, and redirects to frontend.
+    """
+    frontend_base = settings.FRONTEND_URL.rstrip("/")
+    if error:
+        err_param = quote_plus(f"Google authorization failed: {error}")
+        return RedirectResponse(url=f"{frontend_base}/dashboard?gmail_error={err_param}", status_code=302)
+
+    if not state or not code:
+        err_param = quote_plus("Missing code or state in OAuth callback.")
+        return RedirectResponse(url=f"{frontend_base}/dashboard?gmail_error={err_param}", status_code=302)
+
+    # Locate user via state record
+    stmt = select(OAuthState).where(OAuthState.state == state.strip())
+    res = await db.execute(stmt)
+    state_rec = res.scalar_one_or_none()
+
+    if not state_rec:
+        err_param = quote_plus("Invalid or expired OAuth state parameter (CSRF protection failed).")
+        return RedirectResponse(url=f"{frontend_base}/dashboard?gmail_error={err_param}", status_code=302)
+
+    user_res = await db.execute(select(User).where(User.id == state_rec.user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        err_param = quote_plus("Associated PhishGuard user account not found.")
+        return RedirectResponse(url=f"{frontend_base}/dashboard?gmail_error={err_param}", status_code=302)
+
+    try:
+        integration = await gmail_oauth_service.exchange_code_and_verify_account(
+            db=db,
+            user=user,
+            code=code,
+            state=state,
+        )
+        email_param = quote_plus(integration.email_address)
+        return RedirectResponse(url=f"{frontend_base}/dashboard?gmail_connected=true&email={email_param}", status_code=302)
+    except Exception as e:
+        err_param = quote_plus(str(e))
+        return RedirectResponse(url=f"{frontend_base}/dashboard?gmail_error={err_param}", status_code=302)
+
+
+@router.get("/accounts")
+async def list_connected_gmail_accounts(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lists all Gmail connections associated with the current user / organization."""
+    query = select(GmailIntegration).where(
+        GmailIntegration.organization_id == current_user.organization_id,
+        GmailIntegration.user_id == current_user.id,
+    ).order_by(desc(GmailIntegration.created_at))
+
+    result = await db.execute(query)
+    integrations = result.scalars().all()
+
+    accounts = [
+        {
+            "id": str(i.id),
+            "email_address": i.email_address,
+            "is_connected": i.is_connected,
+            "connection_status": i.connection_status,
+            "token_status": i.token_status,
+            "granted_scopes": i.granted_scopes or [],
+            "connected_at": i.connected_at.isoformat() if i.connected_at else None,
+            "last_verified_at": i.last_verified_at.isoformat() if i.last_verified_at else None,
+            "last_synced_at": i.last_synced_at.isoformat() if i.last_synced_at else None,
+            "last_error": i.last_error,
+            "auto_analyze_enabled": i.auto_analyze_enabled,
+        }
+        for i in integrations
+    ]
+    return success_response({"accounts": accounts, "total": len(accounts)})
+
+
+@router.post("/disconnect")
+async def disconnect_gmail(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Disconnects the connected Gmail account and revokes access with Google."""
+    disconnected = await gmail_oauth_service.disconnect_and_revoke(db, current_user)
+    if not disconnected:
+        return success_response({"message": "No active Gmail account to disconnect."})
+    return success_response({"message": "Gmail account disconnected and tokens revoked successfully."})
+
+
+@router.post("/accounts/{account_id}/disconnect")
+async def disconnect_gmail_account_by_id(
+    account_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Disconnects a specific Gmail account connection and revokes credentials."""
+    disconnected = await gmail_oauth_service.disconnect_and_revoke(db, current_user, integration_id=account_id)
+    if not disconnected:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Gmail connection not found.")
+    return success_response({"message": "Gmail connection disconnected successfully."})
+
+
 @router.post("/connect")
 async def connect_gmail(
     payload: ConnectGmailRequest,
@@ -366,8 +564,7 @@ async def connect_gmail(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Connects Gmail account to PhishGuard AI.
-    Seeds the initial mailbox and triggers auto-analysis if enabled.
+    Legacy/Fallback connect endpoint (deprecated in favor of genuine Google OAuth flow).
     """
     res = await db.execute(
         select(GmailIntegration).where(
@@ -385,6 +582,8 @@ async def connect_gmail(
             user_id=current_user.id,
             email_address=payload.email_address,
             is_connected=True,
+            connection_status="connected",
+            token_status="valid",
             auto_analyze_enabled=payload.auto_analyze,
             auth_type="app_password" if payload.app_password else "oauth_sync",
             last_synced_at=now,
@@ -393,6 +592,7 @@ async def connect_gmail(
     else:
         integration.email_address = payload.email_address
         integration.is_connected = True
+        integration.connection_status = "connected"
         integration.auto_analyze_enabled = payload.auto_analyze
         integration.last_synced_at = now
         if payload.app_password:
@@ -427,7 +627,6 @@ async def connect_gmail(
             new_msgs.append(gmsg)
         await db.commit()
 
-        # If Auto-Analyze is enabled, immediately run auto-analysis in background
         if payload.auto_analyze:
             for gmsg in new_msgs:
                 asyncio.create_task(_analyze_single_gmail_message_by_id(
@@ -439,26 +638,6 @@ async def connect_gmail(
         "email_address": payload.email_address,
         "auto_analyze_enabled": payload.auto_analyze,
     })
-
-
-@router.post("/disconnect")
-async def disconnect_gmail(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Disconnects the connected Gmail account."""
-    res = await db.execute(
-        select(GmailIntegration).where(
-            GmailIntegration.organization_id == current_user.organization_id,
-            GmailIntegration.user_id == current_user.id,
-        )
-    )
-    integration = res.scalar_one_or_none()
-    if integration:
-        integration.is_connected = False
-        await db.commit()
-
-    return success_response({"message": "Gmail account disconnected successfully"})
 
 
 @router.post("/toggle-auto-analyze")
