@@ -24,6 +24,9 @@ export interface GmailStatus {
   analyzed_messages: number
   pending_messages: number
   critical_threats: number
+  suspicious_threats?: number
+  failed_analyses?: number
+  failed_syncs?: number
   quarantined_messages?: number
   restored_messages?: number
   failed_quarantines?: number

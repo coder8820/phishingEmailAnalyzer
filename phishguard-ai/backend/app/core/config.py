@@ -115,6 +115,11 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = "noreply@phishguard.local"
     SMTP_USE_TLS: bool = True
 
+    # --- Privacy & Data Retention ---
+    GMAIL_RAW_CONTENT_RETENTION_DAYS: int = 30
+    GMAIL_MESSAGE_METADATA_RETENTION_DAYS: int = 90
+    GMAIL_AUTO_RESTORE_ON_DELETION: bool = True
+
     @model_validator(mode="after")
     def validate_production_requirements(self) -> "Settings":
         if self.APP_ENV == "production":

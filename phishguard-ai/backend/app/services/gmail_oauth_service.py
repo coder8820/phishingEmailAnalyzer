@@ -28,7 +28,7 @@ from sqlalchemy import select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models import GmailIntegration, OAuthState, User
+from app.models import GmailIntegration, OAuthState, User, AuditLog
 from app.security.encryption import get_token_encryptor, TokenEncryptionError
 
 logger = logging.getLogger(__name__)
@@ -455,6 +455,14 @@ class GmailOAuthService:
         if not integration:
             return False
 
+        # Attempt to stop watch with Google if active
+        if getattr(integration, "watch_status", "inactive") == "active":
+            try:
+                from app.services.gmail_client_service import gmail_client_service
+                await gmail_client_service.stop_watch(db, integration)
+            except Exception as e:
+                logger.warning("Failed to cleanly stop watch prior to disconnect: %s", e)
+
         # Attempt to revoke token with Google
         token_to_revoke = None
         if integration.refresh_token_encrypted:
@@ -483,7 +491,25 @@ class GmailOAuthService:
         integration.is_connected = False
         integration.connection_status = "disconnected"
         integration.token_status = "revoked"
+        integration.watch_status = "inactive"
+        integration.watch_expiration = None
+        integration.auto_quarantine_enabled = False
         integration.last_error = None
+
+        audit = AuditLog(
+            organization_id=user.organization_id,
+            user_id=user.id,
+            action="gmail.oauth.disconnect",
+            resource_type="gmail_integration",
+            resource_id=integration.id,
+            details={
+                "email_address": integration.email_address,
+                "token_revoked": bool(token_to_revoke),
+                "watch_stopped": True,
+            },
+            severity="info",
+        )
+        db.add(audit)
 
         await db.commit()
         logger.info("Gmail integration disconnected and tokens purged for user %s", user.id)

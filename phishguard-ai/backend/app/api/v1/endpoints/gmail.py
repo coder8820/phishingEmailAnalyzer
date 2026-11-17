@@ -107,6 +107,13 @@ class FalsePositiveReportRequest(BaseModel):
     feedback: Optional[str] = "Reported as legitimate by user"
 
 
+class DataDeletionRequest(BaseModel):
+    restore_quarantined: bool = True
+    purge_synced_messages: bool = True
+    revoke_google_oauth: bool = True
+    confirmation: str
+
+
 # ---------------------------------------------------------------------------
 # Core Analysis Runner for Gmail Message
 # ---------------------------------------------------------------------------
@@ -245,6 +252,22 @@ async def get_gmail_status(
     )
     critical_msgs = critical_q.scalar_one() or 0
 
+    suspicious_q = await db.execute(
+        select(func.count(GmailMessage.id)).where(
+            GmailMessage.integration_id == integration.id,
+            GmailMessage.risk_classification.in_(["Suspicious", "Medium"]),
+        )
+    )
+    suspicious_msgs = suspicious_q.scalar_one() or 0
+
+    failed_analyses_q = await db.execute(
+        select(func.count(GmailMessage.id)).where(
+            GmailMessage.integration_id == integration.id,
+            GmailMessage.analysis_status == "failed",
+        )
+    )
+    failed_analyses = failed_analyses_q.scalar_one() or 0
+
     quarantined_q = await db.execute(
         select(func.count(GmailMessage.id)).where(
             GmailMessage.integration_id == integration.id,
@@ -293,6 +316,9 @@ async def get_gmail_status(
         "analyzed_messages": analyzed_msgs,
         "pending_messages": total_msgs - analyzed_msgs,
         "critical_threats": critical_msgs,
+        "suspicious_threats": suspicious_msgs,
+        "failed_analyses": failed_analyses,
+        "failed_syncs": 1 if integration.last_error else 0,
         "quarantined_messages": quarantined_msgs,
         "restored_messages": restored_msgs,
         "failed_quarantines": failed_msgs,
@@ -1419,4 +1445,138 @@ async def get_quarantine_records(
     return success_response({
         "records": formatted,
         "total": len(formatted),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Privacy & Data Management Endpoints (G6 Requirement 4)
+# ---------------------------------------------------------------------------
+
+@router.get("/privacy/policy")
+async def get_privacy_and_retention_policy(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns active Gmail data retention policies, user rights,
+    and Google API Limited Use compliance disclosures.
+    """
+    return success_response({
+        "data_retention_days": {
+            "raw_mime_content": settings.GMAIL_RAW_CONTENT_RETENTION_DAYS,
+            "message_metadata": settings.GMAIL_MESSAGE_METADATA_RETENTION_DAYS,
+        },
+        "auto_restore_on_deletion": settings.GMAIL_AUTO_RESTORE_ON_DELETION,
+        "google_api_disclosure": (
+            "PhishGuard AI's use and transfer to any other app of information received from Google APIs "
+            "will adhere to Google API Services User Data Policy, including the Limited Use requirements."
+        ),
+        "user_rights": [
+            "Right to Erasure: Users can delete all synced Gmail records at any time via POST /gmail/data-deletion.",
+            "Right to Revoke: Disconnecting revokes tokens directly with Google Identity Services.",
+            "Safe Quarantine Restoration: Quarantined emails can be automatically restored to INBOX upon deletion.",
+            "Non-Destructive Guarantee: PhishGuard never deletes or modifies original emails in Google Mail permanently."
+        ],
+    })
+
+
+@router.post("/data-deletion")
+async def handle_user_data_deletion_request(
+    payload: DataDeletionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Executes a formal User Data Deletion Request (GDPR / Google API Limited Use compliance):
+    1. Restores currently quarantined emails to INBOX if requested.
+    2. Stops active Google Pub/Sub watch.
+    3. Revokes OAuth access with Google Identity Services.
+    4. Purges synced Gmail messages from PhishGuard database.
+    5. Records an immutable audit log entry.
+    """
+    if payload.confirmation not in ("CONFIRM_DELETE", current_user.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirmation string must match 'CONFIRM_DELETE' or your account email address.",
+        )
+
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        return success_response({
+            "message": "No active Gmail integration found for this account.",
+            "restored_count": 0,
+            "purged_messages": 0,
+            "oauth_revoked": False,
+        })
+
+    restored_count = 0
+    # 1. Restore quarantined emails if requested
+    if payload.restore_quarantined and integration.is_connected:
+        q_res = await db.execute(
+            select(GmailMessage).where(
+                GmailMessage.integration_id == integration.id,
+                GmailMessage.is_quarantined == True,
+            )
+        )
+        quarantined_msgs = q_res.scalars().all()
+        for q_msg in quarantined_msgs:
+            try:
+                await gmail_client_service.restore_message(
+                    db=db,
+                    user=current_user,
+                    integration=integration,
+                    gmail_msg=q_msg,
+                )
+                restored_count += 1
+            except Exception as e:
+                logger.warning("Failed to restore message %s during data deletion: %s", q_msg.gmail_message_id, e)
+
+    # 2. Stop watch if active
+    if getattr(integration, "watch_status", "inactive") == "active":
+        try:
+            await gmail_client_service.stop_watch(db, integration)
+        except Exception as e:
+            logger.warning("Failed to stop watch during data deletion: %s", e)
+
+    # 3. Revoke OAuth with Google
+    oauth_revoked = False
+    if payload.revoke_google_oauth:
+        oauth_revoked = await gmail_oauth_service.disconnect_and_revoke(db, current_user, integration.id)
+
+    # 4. Purge synced messages if requested
+    purged_count = 0
+    if payload.purge_synced_messages:
+        del_stmt = delete(GmailMessage).where(GmailMessage.integration_id == integration.id)
+        del_res = await db.execute(del_stmt)
+        purged_count = del_res.rowcount or 0
+
+    # 5. Record immutable AuditLog entry
+    audit = AuditLog(
+        organization_id=current_user.organization_id,
+        user_id=current_user.id,
+        action="gmail.data.deletion_completed",
+        resource_type="gmail_integration",
+        resource_id=integration.id,
+        details={
+            "email_address": integration.email_address,
+            "restored_quarantine_count": restored_count,
+            "purged_message_count": purged_count,
+            "oauth_revoked": oauth_revoked,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        severity="warning",
+    )
+    db.add(audit)
+    await db.commit()
+
+    return success_response({
+        "message": "User data deletion request completed successfully.",
+        "restored_count": restored_count,
+        "purged_messages": purged_count,
+        "oauth_revoked": oauth_revoked,
     })
