@@ -261,3 +261,18 @@ export async function getQuarantineRecords(limit: number = 50): Promise<{ record
   const { data } = await apiClient.get(`/gmail/quarantine/records?limit=${limit}`)
   return data.data
 }
+
+export async function getGmailPrivacyPolicy(): Promise<any> {
+  const { data } = await apiClient.get('/gmail/privacy/policy')
+  return data.data
+}
+
+export async function requestGmailDataDeletion(payload: {
+  confirmation: string
+  restore_quarantined?: boolean
+  purge_synced_messages?: boolean
+  revoke_google_oauth?: boolean
+}): Promise<any> {
+  const { data } = await apiClient.post('/gmail/data-deletion', payload)
+  return data.data
+}

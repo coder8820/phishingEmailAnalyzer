@@ -46,6 +46,8 @@ import {
   quarantineGmailMessage,
   restoreGmailMessage,
   reportFalsePositive,
+  getGmailPrivacyPolicy,
+  requestGmailDataDeletion,
   type GmailStatus,
   type GmailMessageItem,
 } from '@/services/gmailService'
@@ -90,6 +92,12 @@ export function GmailDefenseHub() {
   const [falsePositiveModalMsg, setFalsePositiveModalMsg] = useState<GmailMessageItem | null>(null)
   const [falsePositiveFeedback, setFalsePositiveFeedback] = useState('')
   const [submittingFP, setSubmittingFP] = useState(false)
+
+  // Privacy & Data Management states (G6 Requirement 4)
+  const [showPrivacyModal, setShowPrivacyModal] = useState(false)
+  const [privacyPolicy, setPrivacyPolicy] = useState<any>(null)
+  const [deletionConfirmText, setDeletionConfirmText] = useState('')
+  const [isDeletingData, setIsDeletingData] = useState(false)
 
   // Check URL query parameters on return from backend callback
   useEffect(() => {
@@ -394,6 +402,41 @@ export function GmailDefenseHub() {
       toast.error(detail)
     } finally {
       setSubmittingFP(false)
+    }
+  }
+
+  const handleOpenPrivacyModal = async () => {
+    setShowPrivacyModal(true)
+    try {
+      const pol = await getGmailPrivacyPolicy()
+      setPrivacyPolicy(pol)
+    } catch (e) {
+      console.error('Failed to load privacy policy', e)
+    }
+  }
+
+  const handleDeleteDataSubmit = async () => {
+    if (deletionConfirmText !== 'CONFIRM_DELETE' && deletionConfirmText !== status?.email_address) {
+      toast.error('Confirmation string must match CONFIRM_DELETE or your connected email address.')
+      return
+    }
+    setIsDeletingData(true)
+    try {
+      const res = await requestGmailDataDeletion({
+        confirmation: deletionConfirmText,
+        restore_quarantined: true,
+        purge_synced_messages: true,
+        revoke_google_oauth: true,
+      })
+      toast.success(res.message || 'All synced Gmail data purged and OAuth grant revoked')
+      setShowPrivacyModal(false)
+      setDeletionConfirmText('')
+      await loadData()
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || err.message || 'Data deletion failed'
+      toast.error(detail)
+    } finally {
+      setIsDeletingData(false)
     }
   }
 
