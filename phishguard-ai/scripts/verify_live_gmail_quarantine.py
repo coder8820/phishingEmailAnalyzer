@@ -216,12 +216,36 @@ async def run_live_verification():
         print(f"    [+] Idempotent call returned: {r_idem['status']}")
         assert r_idem['status'] == "already_restored"
 
-        # Step 9: Verify AuditLog entries
-        print("\n[*] Step 9: Verifying Immutable Audit Log Entries...")
+        # Step 9: Test False-Positive Reporting (G5 Requirement 6.6)
+        print("\n[*] Step 9: Testing False-Positive Reporting & Auto-Restore...")
+        # First re-quarantine for FP test
+        await gmail_client_service.quarantine_message(
+            db=session,
+            user=user,
+            integration=integration,
+            gmail_msg=msg,
+            reason="Staging for false-positive test",
+        )
+        fp_res = await gmail_client_service.report_false_positive(
+            db=session,
+            user=user,
+            integration=integration,
+            gmail_msg=msg,
+            feedback="Live test verification - legitimate newsletter",
+        )
+        print(f"    [+] False Positive Result: {fp_res['status']}")
+        print(f"    [+] Restored to Inbox: {fp_res['restored']}")
+        assert fp_res["status"] == "false_positive_recorded"
+        assert fp_res["restored"] is True
+        assert msg.is_quarantined is False
+        assert msg.quarantine_action_status == "false_positive"
+
+        # Step 10: Verify AuditLog entries
+        print("\n[*] Step 10: Verifying Immutable Audit Log Entries...")
         audit_res = await session.execute(
             select(AuditLog).where(
                 AuditLog.resource_id == msg.id
-            ).order_by(AuditLog.created_at.desc()).limit(2)
+            ).order_by(AuditLog.created_at.desc()).limit(3)
         )
         audit_records = audit_res.scalars().all()
         for a in audit_records:

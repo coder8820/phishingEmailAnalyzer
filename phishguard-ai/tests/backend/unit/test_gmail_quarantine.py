@@ -270,6 +270,14 @@ async def test_quarantine_message_success(db_session, mock_user, mock_integratio
                 "labelIds": ["Label_Q123", "UNREAD"],
             }
             return resp
+        if "?format=minimal" in url:
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.json.return_value = {
+                "id": mock_message.gmail_message_id,
+                "labelIds": ["Label_Q123", "UNREAD"],
+            }
+            return resp
         raise ValueError(f"Unexpected URL: {url}")
 
     with patch.object(client, "_make_api_request", side_effect=mock_api):
@@ -460,6 +468,14 @@ async def test_restore_message_success(db_session, mock_user, mock_integration, 
             return resp
         if "modify" in url:
             recorded_modify_body = kwargs.get("json_data", {})
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.json.return_value = {
+                "id": mock_message.gmail_message_id,
+                "labelIds": ["INBOX", "UNREAD"],
+            }
+            return resp
+        if "?format=minimal" in url:
             resp = MagicMock(spec=httpx.Response)
             resp.status_code = 200
             resp.json.return_value = {
