@@ -24,6 +24,9 @@ os.environ["TOKEN_ENCRYPTION_KEY"] = "k8F2j9pL4mN6qR8sT1uV3wX5yZ7aB9cD1eF3gH5iJ7
 os.environ["GOOGLE_CLIENT_ID"] = "test-google-client-id.apps.googleusercontent.com"
 os.environ["GOOGLE_CLIENT_SECRET"] = "test-google-client-secret"
 os.environ["GOOGLE_REDIRECT_URI"] = "http://localhost:3001/integrations/gmail/callback"
+os.environ["GMAIL_PUBSUB_TOPIC"] = "projects/test-project/topics/gmail-notifications"
+os.environ["GMAIL_PUBSUB_SUBSCRIPTION"] = "projects/test-project/subscriptions/gmail-inbox-push"
+os.environ["GMAIL_PUBSUB_VERIFICATION_TOKEN"] = "test-pubsub-secret-token-12345"
 os.environ["ALLOWED_ORIGINS"] = '["http://localhost:3001","http://localhost:3000","http://localhost:80"]'
 
 from app.core.config import get_settings

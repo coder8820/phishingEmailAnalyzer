@@ -619,6 +619,7 @@ class GmailIntegration(Base):
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
     last_history_id = Column(String(64), nullable=True)
     quarantine_label_id = Column(String(100), nullable=True)
+    watch_status = Column(String(50), default="inactive", nullable=False)        # active | inactive | expired | error
     watch_expiration = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
 
