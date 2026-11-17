@@ -8,12 +8,14 @@ sandbox AI phishing analysis with real-time detection.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, update, func, desc
@@ -38,6 +40,8 @@ from app.services.gmail_client_service import (
     GmailRateLimitError,
     GmailPermissionError,
     GmailInitialScanConsentRequiredError,
+    GmailWatchError,
+    GmailHistoryExpiredError,
 )
 from app.workers.tasks import execute_email_analysis
 from app.utils.response import success_response, error_response
@@ -76,6 +80,17 @@ class InitialScanRequest(BaseModel):
 
 class ToggleAutoAnalyzeRequest(BaseModel):
     enabled: bool
+
+
+class PubSubMessageData(BaseModel):
+    data: str
+    messageId: str
+    publishTime: Optional[str] = None
+
+
+class PubSubPushRequest(BaseModel):
+    message: PubSubMessageData
+    subscription: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +187,10 @@ async def get_gmail_status(
             "granted_scopes": integration.granted_scopes if integration else [],
             "last_verified_at": integration.last_verified_at.isoformat() if integration and integration.last_verified_at else None,
             "last_error": integration.last_error if integration else None,
+            "watch_status": "inactive",
+            "watch_expiration": None,
+            "last_history_id": None,
+            "pubsub_topic": settings.GMAIL_PUBSUB_TOPIC or None,
             "auto_analyze_enabled": False,
             "total_messages": 0,
             "analyzed_messages": 0,
@@ -212,6 +231,10 @@ async def get_gmail_status(
         "granted_scopes": integration.granted_scopes or [],
         "last_verified_at": integration.last_verified_at.isoformat() if integration.last_verified_at else None,
         "last_error": integration.last_error,
+        "watch_status": getattr(integration, "watch_status", "inactive"),
+        "watch_expiration": integration.watch_expiration.isoformat() if integration.watch_expiration else None,
+        "last_history_id": integration.last_history_id,
+        "pubsub_topic": settings.GMAIL_PUBSUB_TOPIC or None,
         "auto_analyze_enabled": integration.auto_analyze_enabled,
         "auth_type": integration.auth_type,
         "total_messages": total_msgs,
@@ -709,6 +732,184 @@ async def sync_gmail_inbox(
         )
 
 
+# In-memory deduplication cache for recent Pub/Sub message IDs
+_PROCESSED_PUBSUB_MSG_IDS: set[str] = set()
+_MAX_PUBSUB_CACHE = 1000
+
+
+@router.post("/watch")
+async def start_gmail_watch(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Activates real-time Gmail push notification watch for user's connected account.
+    Configures watch for INBOX label only with least privilege.
+    """
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active Gmail account connected. Connect Gmail first."
+        )
+
+    try:
+        result = await gmail_client_service.watch_inbox(db=db, integration=integration)
+        return success_response({
+            "message": "Gmail real-time watch successfully established.",
+            **result,
+        })
+    except GmailWatchError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except GmailPermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except GoogleTokenRevokedError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    except GmailAPIError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Google API error: {e}")
+
+
+@router.post("/stop-watch")
+async def stop_gmail_watch(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stops real-time Gmail push notifications for user's connected account."""
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active Gmail account connected."
+        )
+
+    result = await gmail_client_service.stop_watch(db=db, integration=integration)
+    return success_response(result)
+
+
+@router.post("/webhook/pubsub")
+async def gmail_pubsub_webhook(
+    request: Request,
+    payload: PubSubPushRequest,
+    token: Optional[str] = Query(None, description="Verification token query parameter"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dedicated Google Cloud Pub/Sub push notification endpoint for real-time Gmail monitoring.
+    1. Authenticates push request via configured verification token or Google OIDC Bearer token.
+    2. Validates subscription identity.
+    3. Decodes message.data (base64 JSON containing emailAddress and historyId).
+    4. Validates connection ownership and status in database.
+    5. Acknowledges immediately with HTTP 200 to prevent Pub/Sub delivery timeout.
+    6. Enqueues background history synchronization task.
+    """
+    global _PROCESSED_PUBSUB_MSG_IDS
+
+    # 1. Verification Token / Authentication
+    expected_token = settings.GMAIL_PUBSUB_VERIFICATION_TOKEN
+    if expected_token:
+        auth_header = request.headers.get("Authorization", "")
+        bearer_token = auth_header.replace("Bearer ", "").strip() if auth_header.startswith("Bearer ") else ""
+        header_token = (
+            request.headers.get("X-Goog-Pubsub-Verification-Token")
+            or request.headers.get("X-Pubsub-Verification-Token")
+            or bearer_token
+        )
+
+        incoming_token = token or header_token
+        if not incoming_token or incoming_token != expected_token:
+            logger.warning("Pub/Sub webhook rejected: invalid or missing verification token")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: invalid or missing Pub/Sub verification token",
+            )
+
+    # 2. Subscription Identity Validation
+    expected_subscription = settings.GMAIL_PUBSUB_SUBSCRIPTION
+    if expected_subscription and payload.subscription:
+        if not payload.subscription.endswith(expected_subscription) and payload.subscription != expected_subscription:
+            logger.warning("Pub/Sub webhook rejected: subscription mismatch '%s' vs '%s'", payload.subscription, expected_subscription)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid Pub/Sub subscription identity",
+            )
+
+    # 3. Payload Decoding & Validation
+    if not payload.message or not payload.message.data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing Pub/Sub message data payload",
+        )
+
+    try:
+        raw_bytes = base64.b64decode(payload.message.data)
+        notification_data = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as e:
+        logger.error("Failed to decode Pub/Sub push data: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid base64/JSON encoding in Pub/Sub message data",
+        )
+
+    target_email = notification_data.get("emailAddress")
+    history_id = notification_data.get("historyId")
+
+    if not target_email or not history_id:
+        logger.warning("Pub/Sub message missing required fields: %s", notification_data)
+        return success_response({"status": "ignored", "reason": "Missing emailAddress or historyId"})
+
+    # 4. Match to existing authorized Gmail connection (Never trust email from unverified source)
+    stmt = select(GmailIntegration).where(
+        GmailIntegration.email_address == target_email,
+        GmailIntegration.is_connected == True,
+    )
+    res = await db.execute(stmt)
+    integration = res.scalar_one_or_none()
+    if not integration:
+        logger.warning("Received Pub/Sub notification for unknown or disconnected account: %s", target_email)
+        # Return 200 acknowledged so Google Pub/Sub does not enter a continuous retry loop for defunct accounts
+        return success_response({"status": "ignored", "reason": "Account not connected in PhishGuard"})
+
+    # 5. Push Notification Deduplication
+    pubsub_msg_id = payload.message.messageId
+    if pubsub_msg_id:
+        if pubsub_msg_id in _PROCESSED_PUBSUB_MSG_IDS:
+            logger.info("Duplicate Pub/Sub delivery %s for %s; returning ack", pubsub_msg_id, target_email)
+            return success_response({"status": "acknowledged", "duplicate": True})
+
+        if len(_PROCESSED_PUBSUB_MSG_IDS) >= _MAX_PUBSUB_CACHE:
+            _PROCESSED_PUBSUB_MSG_IDS.clear()
+        _PROCESSED_PUBSUB_MSG_IDS.add(pubsub_msg_id)
+
+    # 6. Acknowledge promptly & enqueue background history sync
+    from app.workers.tasks import sync_gmail_history_task, execute_gmail_history_sync
+    try:
+        sync_gmail_history_task.delay(str(integration.id), str(history_id))
+    except Exception:
+        asyncio.create_task(execute_gmail_history_sync(str(integration.id), str(history_id)))
+
+    logger.info("Pub/Sub push acknowledged for %s; historyId=%s enqueued for sync", target_email, history_id)
+    return success_response({
+        "status": "acknowledged",
+        "email_address": target_email,
+        "history_id": str(history_id),
+        "message": "Pub/Sub notification acknowledged and history sync enqueued",
+    })
+
+
 @router.post("/initial-scan")
 async def initial_inbox_scan(
     payload: InitialScanRequest,
@@ -770,3 +971,181 @@ async def initial_inbox_scan(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Google Gmail API error: {e}",
         )
+
+
+# In-memory deduplication cache for recent Pub/Sub message IDs
+_PROCESSED_PUBSUB_MSG_IDS: set[str] = set()
+_MAX_PUBSUB_CACHE = 1000
+
+
+@router.post("/watch")
+async def start_gmail_watch(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Activates real-time Gmail push notification watch for user's connected account.
+    Configures watch for INBOX label only with least privilege.
+    """
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active Gmail account connected. Connect Gmail first."
+        )
+
+    try:
+        result = await gmail_client_service.watch_inbox(db=db, integration=integration)
+        return success_response({
+            "message": "Gmail real-time watch successfully established.",
+            **result,
+        })
+    except GmailWatchError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except GmailPermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except GoogleTokenRevokedError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    except GmailAPIError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Google API error: {e}")
+
+
+@router.post("/stop-watch")
+async def stop_gmail_watch(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stops real-time Gmail push notifications for user's connected account."""
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active Gmail account connected."
+        )
+
+    result = await gmail_client_service.stop_watch(db=db, integration=integration)
+    return success_response(result)
+
+
+@router.post("/webhook/pubsub")
+async def gmail_pubsub_webhook(
+    request: Request,
+    payload: PubSubPushRequest,
+    token: Optional[str] = Query(None, description="Verification token query parameter"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dedicated Google Cloud Pub/Sub push notification endpoint for real-time Gmail monitoring.
+    1. Authenticates push request via configured verification token or Google OIDC Bearer token.
+    2. Validates subscription identity.
+    3. Decodes message.data (base64 JSON containing emailAddress and historyId).
+    4. Validates connection ownership and status in database.
+    5. Acknowledges immediately with HTTP 200 to prevent Pub/Sub delivery timeout.
+    6. Enqueues background history synchronization task.
+    """
+    global _PROCESSED_PUBSUB_MSG_IDS
+
+    # 1. Verification Token / Authentication
+    expected_token = settings.GMAIL_PUBSUB_VERIFICATION_TOKEN
+    if expected_token:
+        auth_header = request.headers.get("Authorization", "")
+        bearer_token = auth_header.replace("Bearer ", "").strip() if auth_header.startswith("Bearer ") else ""
+        header_token = (
+            request.headers.get("X-Goog-Pubsub-Verification-Token")
+            or request.headers.get("X-Pubsub-Verification-Token")
+            or bearer_token
+        )
+
+        incoming_token = token or header_token
+        if not incoming_token or incoming_token != expected_token:
+            logger.warning("Pub/Sub webhook rejected: invalid or missing verification token")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: invalid or missing Pub/Sub verification token",
+            )
+
+    # 2. Subscription Identity Validation
+    expected_subscription = settings.GMAIL_PUBSUB_SUBSCRIPTION
+    if expected_subscription and payload.subscription:
+        if not payload.subscription.endswith(expected_subscription) and payload.subscription != expected_subscription:
+            logger.warning("Pub/Sub webhook rejected: subscription mismatch '%s' vs '%s'", payload.subscription, expected_subscription)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid Pub/Sub subscription identity",
+            )
+
+    # 3. Payload Decoding & Validation
+    if not payload.message or not payload.message.data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing Pub/Sub message data payload",
+        )
+
+    try:
+        raw_bytes = base64.b64decode(payload.message.data)
+        notification_data = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as e:
+        logger.error("Failed to decode Pub/Sub push data: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid base64/JSON encoding in Pub/Sub message data",
+        )
+
+    target_email = notification_data.get("emailAddress")
+    history_id = notification_data.get("historyId")
+
+    if not target_email or not history_id:
+        logger.warning("Pub/Sub message missing required fields: %s", notification_data)
+        return success_response({"status": "ignored", "reason": "Missing emailAddress or historyId"})
+
+    # 4. Match to existing authorized Gmail connection (Never trust email from unverified source)
+    stmt = select(GmailIntegration).where(
+        GmailIntegration.email_address == target_email,
+        GmailIntegration.is_connected == True,
+    )
+    res = await db.execute(stmt)
+    integration = res.scalar_one_or_none()
+    if not integration:
+        logger.warning("Received Pub/Sub notification for unknown or disconnected account: %s", target_email)
+        # Return 200 acknowledged so Google Pub/Sub does not enter a continuous retry loop for defunct accounts
+        return success_response({"status": "ignored", "reason": "Account not connected in PhishGuard"})
+
+    # 5. Push Notification Deduplication
+    pubsub_msg_id = payload.message.messageId
+    if pubsub_msg_id:
+        if pubsub_msg_id in _PROCESSED_PUBSUB_MSG_IDS:
+            logger.info("Duplicate Pub/Sub delivery %s for %s; returning ack", pubsub_msg_id, target_email)
+            return success_response({"status": "acknowledged", "duplicate": True})
+
+        if len(_PROCESSED_PUBSUB_MSG_IDS) >= _MAX_PUBSUB_CACHE:
+            _PROCESSED_PUBSUB_MSG_IDS.clear()
+        _PROCESSED_PUBSUB_MSG_IDS.add(pubsub_msg_id)
+
+    # 6. Acknowledge promptly & enqueue background history sync
+    from app.workers.tasks import sync_gmail_history_task, execute_gmail_history_sync
+    try:
+        sync_gmail_history_task.delay(str(integration.id), str(history_id))
+    except Exception:
+        asyncio.create_task(execute_gmail_history_sync(str(integration.id), str(history_id)))
+
+    logger.info("Pub/Sub push acknowledged for %s; historyId=%s enqueued for sync", target_email, history_id)
+    return success_response({
+        "status": "acknowledged",
+        "email_address": target_email,
+        "history_id": str(history_id),
+        "message": "Pub/Sub notification acknowledged and history sync enqueued",
+    })
