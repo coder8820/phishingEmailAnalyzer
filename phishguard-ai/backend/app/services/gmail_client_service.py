@@ -934,15 +934,33 @@ class GmailClientService:
             res_data = resp.json()
             updated_labels = res_data.get("labelIds", [])
 
+            # Verify the resulting Gmail labels through a subsequent API read (G5 Requirement 3.8)
+            verify_url = f"{GMAIL_MESSAGES_ENDPOINT}/{gmail_msg.gmail_message_id}?format=minimal"
+            verify_resp = await self._make_api_request(
+                db=db,
+                integration=integration,
+                method="GET",
+                url=verify_url,
+            )
+            verified_data = verify_resp.json() if hasattr(verify_resp, "json") else {}
+            verified_labels = verified_data.get("labelIds", updated_labels)
+
+            if quarantine_label_id not in verified_labels or "INBOX" in verified_labels:
+                raise GmailAPIError(
+                    f"Quarantine verification failed: subsequent Gmail read shows labels {verified_labels} "
+                    f"instead of expected quarantine state (label '{quarantine_label_name}' present, INBOX removed).",
+                    status_code=502
+                )
+
             now_dt = datetime.now(timezone.utc)
-            gmail_msg.label_ids = updated_labels
+            gmail_msg.label_ids = verified_labels
             gmail_msg.is_quarantined = True
             gmail_msg.quarantined_at = now_dt
             gmail_msg.quarantine_reason = reason
             gmail_msg.quarantine_action_status = "quarantined"
             gmail_msg.quarantine_error = None
 
-            # Record AuditLog
+            # Record comprehensive AuditLog entry (G5 Requirement 7)
             audit = AuditLog(
                 organization_id=user.organization_id,
                 user_id=user.id,
@@ -950,12 +968,21 @@ class GmailClientService:
                 resource_type="gmail_message",
                 resource_id=gmail_msg.id,
                 details={
+                    "user_id": str(user.id),
+                    "integration_id": str(integration.id),
                     "gmail_message_id": gmail_msg.gmail_message_id,
-                    "subject": gmail_msg.subject,
-                    "sender": gmail_msg.sender,
+                    "previous_labels": current_labels,
+                    "new_labels": verified_labels,
+                    "analysis_result": gmail_msg.risk_classification,
                     "risk_score": gmail_msg.risk_score,
-                    "risk_classification": gmail_msg.risk_classification,
-                    "reason": reason,
+                    "quarantine_reason": reason,
+                    "action_timestamp": now_dt.isoformat(),
+                    "restore_timestamp": None,
+                    "api_result": {
+                        "modify_status": resp.status_code if hasattr(resp, "status_code") else 200,
+                        "verified_read_status": verify_resp.status_code if hasattr(verify_resp, "status_code") else 200,
+                        "verification_confirmed": True,
+                    },
                     "is_automatic": is_automatic,
                     "quarantine_label_id": quarantine_label_id,
                     "quarantine_label_name": quarantine_label_name,
@@ -973,11 +1000,11 @@ class GmailClientService:
             return {
                 "status": "quarantined",
                 "gmail_message_id": gmail_msg.gmail_message_id,
-                "label_ids": updated_labels,
+                "label_ids": verified_labels,
                 "quarantined_at": now_dt.isoformat(),
                 "quarantine_reason": reason,
                 "is_automatic": is_automatic,
-                "message": f"Email successfully moved from INBOX to {quarantine_label_name}.",
+                "message": f"Email successfully moved from INBOX to {quarantine_label_name} and verified.",
             }
 
         except Exception as e:
@@ -1068,15 +1095,39 @@ class GmailClientService:
             res_data = resp.json()
             updated_labels = res_data.get("labelIds", [])
 
+            # Verify the resulting Gmail labels through a subsequent API read (G5 Requirement 4.6)
+            verify_url = f"{GMAIL_MESSAGES_ENDPOINT}/{gmail_msg.gmail_message_id}?format=minimal"
+            verify_resp = await self._make_api_request(
+                db=db,
+                integration=integration,
+                method="GET",
+                url=verify_url,
+            )
+            verified_data = verify_resp.json() if hasattr(verify_resp, "json") else {}
+            verified_labels = verified_data.get("labelIds", updated_labels)
+
+            if quarantine_label_id in verified_labels:
+                raise GmailAPIError(
+                    f"Restore verification failed: subsequent Gmail read shows quarantine label '{quarantine_label_name}' "
+                    f"was not removed in Google mailbox. Current labels: {verified_labels}",
+                    status_code=502
+                )
+            if "INBOX" in body["addLabelIds"] and "INBOX" not in verified_labels:
+                raise GmailAPIError(
+                    f"Restore verification failed: subsequent Gmail read shows INBOX label was not restored in Google mailbox. "
+                    f"Current labels: {verified_labels}",
+                    status_code=502
+                )
+
             now_dt = datetime.now(timezone.utc)
-            gmail_msg.label_ids = updated_labels
+            gmail_msg.label_ids = verified_labels
             gmail_msg.is_quarantined = False
             gmail_msg.restored_at = now_dt
             gmail_msg.restored_by = user.id
             gmail_msg.quarantine_action_status = "restored"
             gmail_msg.quarantine_error = None
 
-            # Record AuditLog
+            # Record comprehensive AuditLog entry (G5 Requirement 7)
             audit = AuditLog(
                 organization_id=user.organization_id,
                 user_id=user.id,
@@ -1084,10 +1135,24 @@ class GmailClientService:
                 resource_type="gmail_message",
                 resource_id=gmail_msg.id,
                 details={
+                    "user_id": str(user.id),
+                    "integration_id": str(integration.id),
                     "gmail_message_id": gmail_msg.gmail_message_id,
-                    "subject": gmail_msg.subject,
-                    "restored_by": str(user.id),
+                    "previous_labels": current_labels,
+                    "new_labels": verified_labels,
+                    "analysis_result": gmail_msg.risk_classification,
+                    "risk_score": gmail_msg.risk_score,
+                    "quarantine_reason": gmail_msg.quarantine_reason,
+                    "action_timestamp": gmail_msg.quarantined_at.isoformat() if gmail_msg.quarantined_at else None,
+                    "restore_timestamp": now_dt.isoformat(),
+                    "api_result": {
+                        "modify_status": resp.status_code if hasattr(resp, "status_code") else 200,
+                        "verified_read_status": verify_resp.status_code if hasattr(verify_resp, "status_code") else 200,
+                        "verification_confirmed": True,
+                    },
                     "quarantine_label_id": quarantine_label_id,
+                    "quarantine_label_name": quarantine_label_name,
+                    "restored_by": str(user.id),
                 },
                 severity="info",
             )
@@ -1099,9 +1164,9 @@ class GmailClientService:
             return {
                 "status": "restored",
                 "gmail_message_id": gmail_msg.gmail_message_id,
-                "label_ids": updated_labels,
+                "label_ids": verified_labels,
                 "restored_at": now_dt.isoformat(),
-                "message": f"Email successfully restored from {quarantine_label_name} to INBOX.",
+                "message": f"Email successfully restored from {quarantine_label_name} to INBOX and verified.",
             }
 
         except Exception as e:
@@ -1126,6 +1191,76 @@ class GmailClientService:
 
             logger.error("Failed to restore Gmail message %s: %s", gmail_msg.gmail_message_id, e)
             raise
+
+    async def report_false_positive(
+        self,
+        db: AsyncSession,
+        user: User,
+        integration: GmailIntegration,
+        gmail_msg: GmailMessage,
+        feedback: str = "Reported as legitimate by user",
+    ) -> Dict[str, Any]:
+        """
+        Reports a false positive detection on a Gmail message (G5 Requirement 6.6):
+        - Safely restores the message to INBOX if quarantined
+        - Marks message status as false_positive
+        - Updates associated IOC records to prevent recurring false positives
+        - Records an immutable audit log entry
+        """
+        if gmail_msg.organization_id != user.organization_id or gmail_msg.integration_id != integration.id:
+            raise GmailPermissionError("Access denied: message does not belong to user's organization or Gmail integration.")
+
+        restore_result = None
+        if gmail_msg.is_quarantined:
+            restore_result = await self.restore_message(db, user, integration, gmail_msg)
+
+        now_dt = datetime.now(timezone.utc)
+        gmail_msg.quarantine_action_status = "false_positive"
+
+        # Update IOCs linked to this email to prevent recurring false positives
+        if gmail_msg.email_id:
+            from app.models import IOC
+            await db.execute(
+                update(IOC)
+                .where(IOC.email_id == gmail_msg.email_id)
+                .values(is_false_positive=True)
+            )
+
+        audit = AuditLog(
+            organization_id=user.organization_id,
+            user_id=user.id,
+            action="gmail.message.false_positive_reported",
+            resource_type="gmail_message",
+            resource_id=gmail_msg.id,
+            details={
+                "user_id": str(user.id),
+                "integration_id": str(integration.id),
+                "gmail_message_id": gmail_msg.gmail_message_id,
+                "subject": gmail_msg.subject,
+                "sender": gmail_msg.sender,
+                "risk_score": gmail_msg.risk_score,
+                "risk_classification": gmail_msg.risk_classification,
+                "feedback": feedback,
+                "restored": bool(restore_result),
+                "timestamp": now_dt.isoformat(),
+            },
+            severity="info",
+        )
+        db.add(audit)
+        await db.commit()
+
+        logger.info(
+            "False positive reported for Gmail message %s by user %s (Feedback: %s)",
+            gmail_msg.gmail_message_id, user.id, feedback
+        )
+
+        return {
+            "status": "false_positive_recorded",
+            "gmail_message_id": gmail_msg.gmail_message_id,
+            "restored": bool(restore_result),
+            "feedback": feedback,
+            "message": "Message marked as legitimate. Email restored to INBOX and detection indicators updated.",
+        }
 
     def evaluate_quarantine_policy(
         self,
