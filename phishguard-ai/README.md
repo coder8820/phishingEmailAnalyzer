@@ -16,6 +16,7 @@ PhishGuard AI is an enterprise-grade phishing email detection and investigation 
 - **Rule-based detection** — SPF/DKIM/DMARC authentication analysis, URL pattern detection, attachment security
 - **AI-powered analysis** — Contextual threat assessment using LLMs with prompt injection defenses
 - **Threat intelligence** — Optional integration with VirusTotal, URLhaus, AbuseIPDB
+- **Real-Time Gmail Monitoring & Quarantine** — Official Google OAuth 2.0 (PKCE), Cloud Pub/Sub push synchronization, non-destructive mailbox quarantine (`PhishGuard-Quarantine`), and one-click restore
 - **Explainable risk scoring** — Weighted, transparent 0–100 risk score with signal breakdown
 - **IOC extraction** — Automatic extraction of IPs, domains, URLs, hashes, emails
 - **SOC workflow** — Full incident management, investigation notes, audit logging
@@ -161,6 +162,21 @@ VIRUSTOTAL_ENABLED=true
 ABUSEIPDB_API_KEY=...
 ABUSEIPDB_ENABLED=true
 ```
+
+### Gmail Integration & Real-Time Monitoring (Optional)
+
+Connect your Google Cloud project to enable real-time inbox synchronization and automated mailbox quarantine:
+
+```bash
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_REDIRECT_URI=http://localhost:8000/api/v1/gmail/callback
+GMAIL_PUBSUB_TOPIC=projects/your-gcp-project/topics/phishguard-gmail-notifications
+GMAIL_PUBSUB_SUBSCRIPTION=projects/your-gcp-project/subscriptions/phishguard-gmail-inbox-push
+GMAIL_PUBSUB_VERIFICATION_TOKEN=your-random-token
+```
+
+For complete Google Cloud Platform setup, Pub/Sub IAM configuration, and CASA Tier 2 assessment instructions, see the [Gmail Integration & Production Deployment Guide](docs/GMAIL_INTEGRATION_GUIDE.md).
 
 ---
 
@@ -326,7 +342,7 @@ celery -A app.workers.celery_app worker --loglevel=info
 - [ ] Webhook notifications (Slack, PagerDuty, Teams)
 - [ ] MITRE ATT&CK technique tagging
 - [ ] YARA rule-based attachment analysis
-- [ ] Automated quarantine actions (Exchange/Gmail integration)
+- [x] Automated quarantine actions (Gmail integration complete; see [Gmail Integration Guide](docs/GMAIL_INTEGRATION_GUIDE.md))
 - [ ] Threat actor attribution
 - [ ] Email campaign clustering
 - [ ] Mobile-responsive PWA
