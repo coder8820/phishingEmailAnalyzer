@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3001"
     BACKEND_PUBLIC_URL: str = "http://localhost:8000"
 
+    # --- Google Cloud Pub/Sub & Real-Time Monitoring (Milestone G3) ---
+    GMAIL_PUBSUB_TOPIC: str = ""           # e.g., "projects/my-project/topics/gmail-notifications"
+    GMAIL_PUBSUB_SUBSCRIPTION: str = ""    # e.g., "projects/my-project/subscriptions/gmail-inbox-push"
+    GMAIL_PUBSUB_VERIFICATION_TOKEN: str = ""  # Shared verification secret for push endpoints
+    GMAIL_PUBSUB_AUDIENCE: str = ""        # Expected JWT audience for Google OIDC verification
+
     @property
     def EFFECTIVE_TOKEN_ENCRYPTION_KEY(self) -> str:
         return self.TOKEN_ENCRYPTION_KEY.strip() if self.TOKEN_ENCRYPTION_KEY else self.ENCRYPTION_KEY.strip()
