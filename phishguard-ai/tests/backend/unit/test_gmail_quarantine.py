@@ -20,7 +20,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app.models import AuditLog, EmailAnalysis, GmailIntegration, GmailMessage, User
+from app.models import AuditLog, EmailAnalysis, GmailIntegration, GmailMessage, User, IOC
 from app.services.gmail_client_service import (
     GmailClientService,
     GmailAPIError,
@@ -528,3 +528,186 @@ async def test_restore_message_idempotent(db_session, mock_user, mock_integratio
 
         assert res["status"] == "already_restored"
         assert api_called is False
+
+
+@pytest.mark.asyncio
+async def test_quarantine_subsequent_read_verification_failure(db_session, mock_user, mock_integration, mock_message):
+    """
+    Verify G5 Requirement 3.8:
+    If modify succeeds but subsequent API read shows labels do not match expected quarantine state,
+    a GmailAPIError is raised and the message is NOT marked as quarantined.
+    """
+    db_session.add(mock_user)
+    mock_integration.quarantine_label_id = "Label_Q123"
+    db_session.add(mock_integration)
+    db_session.add(mock_message)
+    await db_session.commit()
+
+    client = GmailClientService()
+
+    async def mock_api(db, integration, method, url, **kwargs):
+        if method == "POST" and "modify" in url:
+            # Modify claims success
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["Label_Q123"]}
+            return m
+        elif method == "GET" and "?format=minimal" in url:
+            # Subsequent read returns stale or failed state (INBOX still present)
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["INBOX", "Label_Q123"]}
+            return m
+        raise ValueError(f"Unexpected call: {method} {url}")
+
+    with patch.object(client, "_make_api_request", side_effect=mock_api):
+        with pytest.raises(GmailAPIError, match="Quarantine verification failed"):
+            await client.quarantine_message(
+                db=db_session,
+                user=mock_user,
+                integration=mock_integration,
+                gmail_msg=mock_message,
+                reason="Testing subsequent verification failure",
+            )
+
+        assert mock_message.is_quarantined is False
+        assert mock_message.quarantine_action_status == "failed"
+        assert "Quarantine verification failed" in (mock_message.quarantine_error or "")
+
+
+@pytest.mark.asyncio
+async def test_restore_subsequent_read_verification_failure(db_session, mock_user, mock_integration, mock_message):
+    """
+    Verify G5 Requirement 4.6:
+    If restore modify succeeds but subsequent API read shows quarantine label still present,
+    a GmailAPIError is raised and the message remains quarantined.
+    """
+    db_session.add(mock_user)
+    mock_integration.quarantine_label_id = "Label_Q123"
+    db_session.add(mock_integration)
+
+    mock_message.is_quarantined = True
+    mock_message.quarantined_at = datetime.now(timezone.utc)
+    mock_message.quarantine_action_status = "quarantined"
+    mock_message.label_ids = ["Label_Q123"]
+    mock_message.original_labels = ["INBOX", "UNREAD"]
+    db_session.add(mock_message)
+    await db_session.commit()
+
+    client = GmailClientService()
+
+    async def mock_api(db, integration, method, url, **kwargs):
+        if method == "POST" and "modify" in url:
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["INBOX"]}
+            return m
+        elif method == "GET" and "?format=minimal" in url:
+            # Subsequent read shows quarantine label is still present
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["INBOX", "Label_Q123"]}
+            return m
+        raise ValueError(f"Unexpected call: {method} {url}")
+
+    with patch.object(client, "_make_api_request", side_effect=mock_api):
+        with pytest.raises(GmailAPIError, match="Restore verification failed"):
+            await client.restore_message(
+                db=db_session,
+                user=mock_user,
+                integration=mock_integration,
+                gmail_msg=mock_message,
+            )
+
+        assert mock_message.is_quarantined is True
+        assert "Restore verification failed" in (mock_message.quarantine_error or "")
+
+
+@pytest.mark.asyncio
+async def test_report_false_positive_success(db_session, mock_user, mock_integration, mock_message):
+    """
+    Verify G5 Requirement 6.6:
+    Reporting a false positive restores the quarantined email to INBOX,
+    marks quarantine_action_status as 'false_positive', updates linked IOCs,
+    and logs an audit trail.
+    """
+    from app.models import Email
+    db_session.add(mock_user)
+    mock_integration.quarantine_label_id = "Label_Q123"
+    db_session.add(mock_integration)
+
+    email_obj = Email(
+        id=uuid.uuid4(),
+        organization_id=mock_user.organization_id,
+        user_id=mock_user.id,
+        sender="partner@newsletter.com",
+        recipient="analyst@securecorp.com",
+        subject="Monthly Industry Insights",
+        raw_eml_path="/tmp/test.eml",
+        raw_eml_sha256="testsha256",
+        file_size_bytes=1024,
+    )
+    db_session.add(email_obj)
+
+    ioc = IOC(
+        id=uuid.uuid4(),
+        email_id=email_obj.id,
+        organization_id=mock_user.organization_id,
+        ioc_type="domain",
+        ioc_value="newsletter.com",
+        threat_level="high",
+        is_false_positive=False,
+    )
+    db_session.add(ioc)
+
+    mock_message.email_id = email_obj.id
+    mock_message.is_quarantined = True
+    mock_message.quarantined_at = datetime.now(timezone.utc)
+    mock_message.label_ids = ["Label_Q123"]
+    mock_message.original_labels = ["INBOX"]
+    db_session.add(mock_message)
+    await db_session.commit()
+
+    client = GmailClientService()
+
+    async def mock_api(db, integration, method, url, **kwargs):
+        if method == "POST" and "modify" in url:
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["INBOX"]}
+            return m
+        elif method == "GET" and "?format=minimal" in url:
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["INBOX"]}
+            return m
+        raise ValueError(f"Unexpected call: {method} {url}")
+
+    with patch.object(client, "_make_api_request", side_effect=mock_api):
+        res = await client.report_false_positive(
+            db=db_session,
+            user=mock_user,
+            integration=mock_integration,
+            gmail_msg=mock_message,
+            feedback="Verified partner newsletter",
+        )
+
+        assert res["status"] == "false_positive_recorded"
+        assert res["restored"] is True
+        assert mock_message.is_quarantined is False
+        assert mock_message.quarantine_action_status == "false_positive"
+
+        # Check IOC updated
+        await db_session.refresh(ioc)
+        assert ioc.is_false_positive is True
+
+        # Check AuditLog entry
+        audit_res = await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.resource_id == mock_message.id,
+                AuditLog.action == "gmail.message.false_positive_reported",
+            )
+        )
+        audit = audit_res.scalar_one_or_none()
+        assert audit is not None
+        assert audit.details["feedback"] == "Verified partner newsletter"

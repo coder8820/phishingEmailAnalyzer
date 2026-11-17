@@ -45,6 +45,7 @@ import {
   disableQuarantine,
   quarantineGmailMessage,
   restoreGmailMessage,
+  reportFalsePositive,
   type GmailStatus,
   type GmailMessageItem,
 } from '@/services/gmailService'
@@ -65,7 +66,7 @@ export function GmailDefenseHub() {
   const [search, setSearch] = useState('')
   const [threatFilter, setThreatFilter] = useState<'all' | 'safe' | 'suspicious' | 'critical'>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'analyzed' | 'pending'>('all')
-  const [quarantineFilter, setQuarantineFilter] = useState<'all' | 'quarantined' | 'inbox' | 'restored' | 'failed'>('all')
+  const [quarantineFilter, setQuarantineFilter] = useState<'all' | 'quarantined' | 'inbox' | 'restored' | 'failed' | 'false_positive'>('all')
 
   // Real Google OAuth 2.0 flow states
   const [isStartingOAuth, setIsStartingOAuth] = useState(false)
@@ -84,6 +85,11 @@ export function GmailDefenseHub() {
   const [enablingQuarantine, setEnablingQuarantine] = useState(false)
   const [quarantiningId, setQuarantiningId] = useState<string | null>(null)
   const [restoringId, setRestoringId] = useState<string | null>(null)
+
+  // False positive reporting modal states (G5 Requirement 6.6)
+  const [falsePositiveModalMsg, setFalsePositiveModalMsg] = useState<GmailMessageItem | null>(null)
+  const [falsePositiveFeedback, setFalsePositiveFeedback] = useState('')
+  const [submittingFP, setSubmittingFP] = useState(false)
 
   // Check URL query parameters on return from backend callback
   useEffect(() => {
@@ -123,6 +129,8 @@ export function GmailDefenseHub() {
           msgs = msgs.filter((m) => m.quarantine_action_status === 'restored')
         } else if (quarantineFilter === 'failed') {
           msgs = msgs.filter((m) => m.quarantine_action_status === 'failed')
+        } else if (quarantineFilter === 'false_positive') {
+          msgs = msgs.filter((m) => m.quarantine_action_status === 'false_positive')
         }
         setMessages(msgs)
       } else {
@@ -157,6 +165,8 @@ export function GmailDefenseHub() {
             msgs = msgs.filter((m) => m.quarantine_action_status === 'restored')
           } else if (quarantineFilter === 'failed') {
             msgs = msgs.filter((m) => m.quarantine_action_status === 'failed')
+          } else if (quarantineFilter === 'false_positive') {
+            msgs = msgs.filter((m) => m.quarantine_action_status === 'false_positive')
           }
           setMessages(msgs)
         })
@@ -367,6 +377,23 @@ export function GmailDefenseHub() {
       toast.error(detail)
     } finally {
       setRestoringId(null)
+    }
+  }
+
+  const handleReportFalsePositiveSubmit = async () => {
+    if (!falsePositiveModalMsg) return
+    setSubmittingFP(true)
+    try {
+      const res = await reportFalsePositive(falsePositiveModalMsg.id, falsePositiveFeedback)
+      toast.success(res.message || 'False positive reported and email restored to INBOX')
+      setFalsePositiveModalMsg(null)
+      setFalsePositiveFeedback('')
+      await loadData(true)
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || err.message || 'Failed to report false positive'
+      toast.error(detail)
+    } finally {
+      setSubmittingFP(false)
     }
   }
 
@@ -679,7 +706,7 @@ export function GmailDefenseHub() {
               </div>
 
               <div className="flex items-center bg-navy-900 border border-navy-700 rounded-lg p-0.5">
-                {(['all', 'quarantined', 'inbox', 'restored', 'failed'] as const).map((qf) => (
+                {(['all', 'quarantined', 'inbox', 'restored', 'failed', 'false_positive'] as const).map((qf) => (
                   <button
                     key={qf}
                     onClick={() => setQuarantineFilter(qf)}
@@ -788,6 +815,11 @@ export function GmailDefenseHub() {
                                 <AlertTriangle className="w-3 h-3 text-red-400" />
                                 <span>Failed</span>
                               </span>
+                            ) : m.quarantine_action_status === 'false_positive' ? (
+                              <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40" title="Reported as false positive and restored">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                <span>False Positive</span>
+                              </span>
                             ) : (
                               <span className="text-[10px] text-slate-500">Inbox</span>
                             )}
@@ -814,15 +846,28 @@ export function GmailDefenseHub() {
                             <div className="flex items-center justify-end gap-2">
                               {/* Restore or Quarantine Action Button */}
                               {m.is_quarantined ? (
-                                <button
-                                  onClick={() => handleRestore(m.id)}
-                                  disabled={restoringId === m.id}
-                                  className="flex items-center gap-1 px-2.5 py-1 bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border border-blue-500/30 rounded text-[11px] transition-colors"
-                                  title="Restore email back to user's Gmail INBOX"
-                                >
-                                  <RotateCcw className={cn('w-3 h-3', restoringId === m.id && 'animate-spin')} />
-                                  <span>Restore</span>
-                                </button>
+                                <>
+                                  <button
+                                    onClick={() => handleRestore(m.id)}
+                                    disabled={restoringId === m.id}
+                                    className="flex items-center gap-1 px-2.5 py-1 bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border border-blue-500/30 rounded text-[11px] transition-colors"
+                                    title="Restore email back to user's Gmail INBOX"
+                                  >
+                                    <RotateCcw className={cn('w-3 h-3', restoringId === m.id && 'animate-spin')} />
+                                    <span>Restore</span>
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setFalsePositiveModalMsg(m)
+                                      setFalsePositiveFeedback('Legitimate communication incorrectly flagged')
+                                    }}
+                                    className="flex items-center gap-1 px-2.5 py-1 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded text-[11px] transition-colors"
+                                    title="Report as false positive and restore to INBOX"
+                                  >
+                                    <AlertTriangle className="w-3 h-3" />
+                                    <span>Report FP</span>
+                                  </button>
+                                </>
                               ) : m.is_analyzed && (m.risk_score || 0) >= 40 ? (
                                 <button
                                   onClick={() => handleManualQuarantine(m.id)}
@@ -1052,6 +1097,26 @@ export function GmailDefenseHub() {
             </div>
 
             <div className="space-y-3.5 text-xs text-slate-300 font-sans leading-relaxed">
+              {status?.has_modify_permission === false && (
+                <div className="p-3 bg-red-500/15 border border-red-500/30 rounded-xl space-y-2">
+                  <div className="flex items-start gap-2 text-red-300 font-mono text-[11px]">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
+                    <span>
+                      <strong>Missing Required Permission:</strong> Your connected account was authorized without the <code className="text-white bg-navy-900 px-1 py-0.5 rounded">gmail.modify</code> scope. You must re-authorize Google permissions before enabling quarantine.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleStartGoogleOAuth}
+                    disabled={isStartingOAuth}
+                    className="w-full flex items-center justify-center gap-2 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg font-mono text-xs font-semibold transition-colors"
+                  >
+                    <Shield className="w-3.5 h-3.5" />
+                    <span>{isStartingOAuth ? 'Redirecting to Google...' : 'Re-authorize Google Permissions'}</span>
+                  </button>
+                </div>
+              )}
+
               <div className="bg-navy-900 border border-navy-700/80 rounded-xl p-3.5 space-y-2 font-mono">
                 <div className="flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
@@ -1134,6 +1199,87 @@ export function GmailDefenseHub() {
                   <ShieldAlert className="w-3.5 h-3.5" />
                 )}
                 <span>{enablingQuarantine ? 'Enabling...' : 'Confirm & Enable Quarantine'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* False Positive Reporting Modal (G5 Requirement 6.6) */}
+      {falsePositiveModalMsg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="relative w-full max-w-lg bg-navy-850 border border-navy-700 rounded-2xl p-6 shadow-2xl">
+            <button
+              onClick={() => {
+                setFalsePositiveModalMsg(null)
+                setFalsePositiveFeedback('')
+              }}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2.5 bg-amber-500/15 border border-amber-500/30 rounded-xl text-amber-300">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white font-mono">
+                  Report False Positive
+                </h3>
+                <p className="text-xs text-slate-400 font-mono">
+                  Restore email to INBOX and update detection indicators
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-300 font-sans">
+              <div className="p-3 bg-navy-900 border border-navy-700 rounded-xl space-y-1 font-mono text-[11px]">
+                <p className="text-slate-400">Subject: <span className="text-white font-medium">{falsePositiveModalMsg.subject}</span></p>
+                <p className="text-slate-400">Sender: <span className="text-slate-200">{falsePositiveModalMsg.sender}</span></p>
+                <p className="text-slate-400">Risk Score: <span className="text-amber-400">{falsePositiveModalMsg.risk_score ?? 'N/A'}/100</span></p>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400 block mb-1">
+                  Analyst Feedback / Notes (Optional)
+                </label>
+                <textarea
+                  value={falsePositiveFeedback}
+                  onChange={(e) => setFalsePositiveFeedback(e.target.value)}
+                  placeholder="e.g. Known internal communication, legitimate partner newsletter, benign security notification..."
+                  className="w-full h-24 bg-navy-900 border border-navy-700 rounded-xl p-3 text-xs font-mono text-white placeholder-slate-600 focus:outline-none focus:border-amber-500 resize-none"
+                />
+              </div>
+
+              <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-[11px] text-emerald-300 font-mono flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-400" />
+                <span>Submitting this report will safely remove the quarantine label in Google Mail, return the email to INBOX, and update PhishGuard threat intelligence to avoid recurring false flags.</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 mt-5 pt-4 border-t border-navy-700/70">
+              <button
+                onClick={() => {
+                  setFalsePositiveModalMsg(null)
+                  setFalsePositiveFeedback('')
+                }}
+                disabled={submittingFP}
+                className="px-4 py-2 bg-navy-800 hover:bg-navy-750 text-slate-300 rounded-xl text-xs font-mono transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReportFalsePositiveSubmit}
+                disabled={submittingFP}
+                className="flex items-center gap-2 px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-mono font-semibold transition-all shadow-md shadow-amber-600/20 disabled:opacity-50"
+              >
+                {submittingFP ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                )}
+                <span>{submittingFP ? 'Reporting...' : 'Confirm False Positive & Restore'}</span>
               </button>
             </div>
           </div>

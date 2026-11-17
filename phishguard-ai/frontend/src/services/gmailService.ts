@@ -18,6 +18,7 @@ export interface GmailStatus {
   quarantine_threshold_score?: number
   quarantine_label_name?: string
   quarantine_label_id?: string | null
+  has_modify_permission?: boolean
   auth_type?: string
   total_messages: number
   analyzed_messages: number
@@ -81,6 +82,7 @@ export interface QuarantineSettings {
   quarantine_label_name: string
   quarantine_label_id: string | null
   has_modify_permission: boolean
+  requires_reauthorization?: boolean
   permission_explanation: string
 }
 
@@ -244,6 +246,11 @@ export async function quarantineGmailMessage(messageId: string, reason?: string)
 
 export async function restoreGmailMessage(messageId: string): Promise<any> {
   const { data } = await apiClient.post(`/gmail/messages/${messageId}/restore`)
+  return data.data
+}
+
+export async function reportFalsePositive(messageId: string, feedback?: string): Promise<any> {
+  const { data } = await apiClient.post(`/gmail/messages/${messageId}/report-false-positive`, { feedback })
   return data.data
 }
 
