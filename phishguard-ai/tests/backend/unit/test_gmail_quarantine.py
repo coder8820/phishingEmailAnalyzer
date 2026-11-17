@@ -665,12 +665,10 @@ async def test_report_false_positive_success(db_session, mock_user, mock_integra
     email_obj = Email(
         id=uuid.uuid4(),
         organization_id=mock_user.organization_id,
-        user_id=mock_user.id,
-        sender="partner@newsletter.com",
-        recipient="analyst@securecorp.com",
+        submitted_by=mock_user.id,
+        source_type="eml_upload",
+        sender_email="partner@newsletter.com",
         subject="Monthly Industry Insights",
-        raw_eml_path="/tmp/test.eml",
-        raw_eml_sha256="testsha256",
         file_size_bytes=1024,
     )
     db_session.add(email_obj)
@@ -681,7 +679,7 @@ async def test_report_false_positive_success(db_session, mock_user, mock_integra
         organization_id=mock_user.organization_id,
         ioc_type="domain",
         ioc_value="newsletter.com",
-        threat_level="high",
+        risk_level="high",
         is_false_positive=False,
     )
     db_session.add(ioc)

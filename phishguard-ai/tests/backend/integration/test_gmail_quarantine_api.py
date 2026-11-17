@@ -283,8 +283,8 @@ async def test_report_false_positive_api(authenticated_client: AsyncClient, db_s
     Reporting a false positive restores the message to INBOX, updates status to false_positive,
     and reflects in both /quarantine/records and /messages?quarantine_status=false_positive.
     """
-    user_id = authenticated_client.user.id
-    org_id = authenticated_client.user.organization_id
+    user_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    org_id = uuid.UUID("00000000-0000-0000-0000-000000000002")
 
     integration = GmailIntegration(
         id=uuid.uuid4(),

@@ -60,7 +60,7 @@ except ImportError as e:
 
 def print_banner():
     print("=" * 80)
-    print(" PHISHGUARD AI — G4: SAFE GMAIL PHISHING QUARANTINE VERIFICATION")
+    print(" PHISHGUARD AI — G5: REAL GMAIL QUARANTINE AND RESTORE VERIFICATION")
     print("=" * 80)
 
 
