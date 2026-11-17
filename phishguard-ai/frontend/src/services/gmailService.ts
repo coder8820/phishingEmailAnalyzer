@@ -8,6 +8,10 @@ export interface GmailStatus {
   granted_scopes?: string[]
   last_verified_at?: string | null
   last_error?: string | null
+  watch_status?: 'active' | 'inactive' | 'expired' | 'error' | string
+  watch_expiration?: string | null
+  last_history_id?: string | null
+  pubsub_topic?: string | null
   auto_analyze_enabled: boolean
   auth_type?: string
   total_messages: number
@@ -158,5 +162,15 @@ export async function syncGmailInbox(maxMessages: number = 20): Promise<SyncInbo
 
 export async function runInitialInboxScan(payload: InitialScanPayload): Promise<SyncInboxResult> {
   const { data } = await apiClient.post('/gmail/initial-scan', payload)
+  return data.data
+}
+
+export async function startGmailWatch(): Promise<any> {
+  const { data } = await apiClient.post('/gmail/watch')
+  return data.data
+}
+
+export async function stopGmailWatch(): Promise<any> {
+  const { data } = await apiClient.post('/gmail/stop-watch')
   return data.data
 }

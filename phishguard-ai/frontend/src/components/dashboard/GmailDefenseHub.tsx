@@ -24,6 +24,7 @@ import {
   Eye,
   X,
   FileText,
+  Radio,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -34,6 +35,8 @@ import {
   toggleAutoAnalyze,
   syncGmailInbox,
   runInitialInboxScan,
+  startGmailWatch,
+  stopGmailWatch,
   analyzeGmailMessageManual,
   analyzeAllGmailPending,
   type GmailStatus,
@@ -50,6 +53,7 @@ export function GmailDefenseHub() {
   const [analyzingAll, setAnalyzingAll] = useState(false)
   const [analyzingId, setAnalyzingId] = useState<string | null>(null)
   const [togglingAuto, setTogglingAuto] = useState(false)
+  const [togglingWatch, setTogglingWatch] = useState(false)
 
   // Filters
   const [search, setSearch] = useState('')
@@ -173,6 +177,26 @@ export function GmailDefenseHub() {
     }
   }
 
+  const handleToggleWatch = async () => {
+    if (!status) return
+    setTogglingWatch(true)
+    try {
+      if (status.watch_status === 'active') {
+        await stopGmailWatch()
+        toast.success('Gmail real-time push watch paused')
+      } else {
+        await startGmailWatch()
+        toast.success('Gmail real-time push watch established via Google Cloud Pub/Sub')
+      }
+      await loadData(true)
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || err.message || 'Failed to update watch status'
+      toast.error(detail)
+    } finally {
+      setTogglingWatch(false)
+    }
+  }
+
   const handleSync = async () => {
     setSyncing(true)
     try {
@@ -265,6 +289,15 @@ export function GmailDefenseHub() {
                   <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                     Token: {status.token_status || 'valid'}
                   </span>
+                  <span className={cn(
+                    "px-2 py-0.5 rounded-md text-[10px] font-mono border flex items-center gap-1",
+                    status.watch_status === 'active'
+                      ? "bg-purple-500/15 text-purple-300 border-purple-500/30"
+                      : "bg-navy-800 text-slate-400 border-navy-700"
+                  )}>
+                    <Radio className={cn("w-2.5 h-2.5", status.watch_status === 'active' && "animate-pulse text-purple-400")} />
+                    Watch: {status.watch_status ? status.watch_status.toUpperCase() : 'INACTIVE'}
+                  </span>
                 </div>
               ) : (
                 <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono bg-slate-500/15 text-slate-400 border border-slate-600/30">
@@ -308,6 +341,35 @@ export function GmailDefenseHub() {
                   )}
                 >
                   {status.auto_analyze_enabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
+
+              {/* Real-Time Push Watch Switch */}
+              <button
+                onClick={handleToggleWatch}
+                disabled={togglingWatch}
+                className={cn(
+                  'flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-mono font-medium transition-all border',
+                  status.watch_status === 'active'
+                    ? 'bg-purple-500/20 text-purple-300 border-purple-500/40 shadow-sm shadow-purple-500/10'
+                    : 'bg-navy-800 text-slate-400 border-navy-700 hover:text-slate-200'
+                )}
+                title={status.watch_status === 'active' ? "Real-time Google Cloud Pub/Sub push watch is active. Click to pause." : "Enable real-time push notifications via Google Cloud Pub/Sub."}
+              >
+                <Radio
+                  className={cn(
+                    'w-3.5 h-3.5',
+                    status.watch_status === 'active' ? 'text-purple-300 animate-pulse' : 'text-slate-500'
+                  )}
+                />
+                <span>Pub/Sub Push:</span>
+                <span
+                  className={cn(
+                    'font-bold',
+                    status.watch_status === 'active' ? 'text-purple-300' : 'text-slate-500'
+                  )}
+                >
+                  {status.watch_status === 'active' ? 'ON' : 'OFF'}
                 </span>
               </button>
 
