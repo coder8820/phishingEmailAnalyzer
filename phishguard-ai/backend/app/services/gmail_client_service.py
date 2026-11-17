@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # Google Gmail API v1 Endpoints
 GMAIL_MESSAGES_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 GMAIL_PROFILE_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+GMAIL_WATCH_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/watch"
+GMAIL_STOP_WATCH_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/stop"
+GMAIL_HISTORY_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/history"
 
 # Query to guarantee INBOX ONLY and exclude drafts, sent, spam, and trash
 INBOX_SEARCH_QUERY = "label:INBOX -in:spam -in:trash -in:drafts -in:sent"
@@ -47,7 +50,9 @@ EXCLUDED_LABELS = {"SPAM", "TRASH", "DRAFT", "SENT"}
 
 class GmailAPIError(Exception):
     """Base exception for Gmail API client errors."""
-    pass
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class GmailRateLimitError(GmailAPIError):
@@ -62,6 +67,16 @@ class GmailPermissionError(GmailAPIError):
 
 class GmailInitialScanConsentRequiredError(GmailAPIError):
     """Raised when initial historical inbox scan is requested without explicit consent."""
+    pass
+
+
+class GmailWatchError(GmailAPIError):
+    """Raised when setting up or renewing Gmail watch fails."""
+    pass
+
+
+class GmailHistoryExpiredError(GmailAPIError):
+    """Raised when startHistoryId is too old or invalid and Google returns HTTP 404."""
     pass
 
 
@@ -134,9 +149,14 @@ class GmailClientService:
                     logger.error("Gmail API 403 Forbidden for %s: %s", integration.email_address, err_body)
                     raise GmailPermissionError(f"Insufficient Gmail permissions for {integration.email_address}: {err_body}")
 
+                # Handle 404 on History API (History ID expired or invalid)
+                if resp.status_code == 404 and GMAIL_HISTORY_ENDPOINT in url:
+                    logger.warning("Gmail history expired (HTTP 404) for %s: %s", integration.email_address, resp.text)
+                    raise GmailHistoryExpiredError(f"Gmail history ID expired or invalid: {resp.text}", status_code=404)
+
                 if resp.status_code >= 400:
                     logger.error("Gmail API HTTP %s: %s", resp.status_code, resp.text)
-                    raise GmailAPIError(f"Gmail API error (HTTP {resp.status_code}): {resp.text}")
+                    raise GmailAPIError(f"Gmail API error (HTTP {resp.status_code}): {resp.text}", status_code=resp.status_code)
 
                 return resp
 
