@@ -562,7 +562,12 @@ async def test_quarantine_subsequent_read_verification_failure(db_session, mock_
     client = GmailClientService()
 
     async def mock_api(db, integration, method, url, **kwargs):
-        if method == "POST" and "modify" in url:
+        if "labels" in url:
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": "Label_Q123", "name": "PhishGuard-Quarantine"}
+            return m
+        elif method == "POST" and "modify" in url:
             # Modify claims success
             m = MagicMock()
             m.status_code = 200
@@ -613,7 +618,12 @@ async def test_restore_subsequent_read_verification_failure(db_session, mock_use
     client = GmailClientService()
 
     async def mock_api(db, integration, method, url, **kwargs):
-        if method == "POST" and "modify" in url:
+        if "labels" in url:
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": "Label_Q123", "name": "PhishGuard-Quarantine"}
+            return m
+        elif method == "POST" and "modify" in url:
             m = MagicMock()
             m.status_code = 200
             m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["INBOX"]}
@@ -687,7 +697,12 @@ async def test_report_false_positive_success(db_session, mock_user, mock_integra
     client = GmailClientService()
 
     async def mock_api(db, integration, method, url, **kwargs):
-        if method == "POST" and "modify" in url:
+        if "labels" in url:
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {"id": "Label_Q123", "name": "PhishGuard-Quarantine"}
+            return m
+        elif method == "POST" and "modify" in url:
             m = MagicMock()
             m.status_code = 200
             m.json.return_value = {"id": mock_message.gmail_message_id, "labelIds": ["INBOX"]}

@@ -177,19 +177,31 @@ async def test_manual_quarantine_and_restore_endpoints(authenticated_client: Asy
     await db_session.commit()
 
     # Mock modify API responses
+    last_modify_labels = []
+
     async def mock_api(*args, **kwargs):
+        nonlocal last_modify_labels
         url = kwargs.get("url")
         if "labels" in url:
             resp = MagicMock(spec=httpx.Response)
             resp.status_code = 200
-            resp.json.return_value = {"id": "Label_TestQuarantine"}
+            resp.json.return_value = {"id": "Label_TestQuarantine", "name": "PhishGuard-Quarantine"}
             return resp
         if "modify" in url:
+            last_modify_labels = kwargs.get("json_data", {}).get("addLabelIds", [])
             resp = MagicMock(spec=httpx.Response)
             resp.status_code = 200
             resp.json.return_value = {
                 "id": "msg_manual_999",
-                "labelIds": kwargs.get("json_data", {}).get("addLabelIds", []),
+                "labelIds": last_modify_labels,
+            }
+            return resp
+        if "?format=minimal" in url:
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.json.return_value = {
+                "id": "msg_manual_999",
+                "labelIds": last_modify_labels,
             }
             return resp
         raise ValueError(f"Unexpected url {url}")
@@ -310,7 +322,10 @@ async def test_report_false_positive_api(authenticated_client: AsyncClient, db_s
     async def mock_api(db, integration, method, url, **kwargs):
         m = MagicMock()
         m.status_code = 200
-        m.json.return_value = {"id": msg.gmail_message_id, "labelIds": ["INBOX", "UNREAD"]}
+        if "labels" in url:
+            m.json.return_value = {"id": "Label_Q123", "name": "PhishGuard-Quarantine"}
+        else:
+            m.json.return_value = {"id": msg.gmail_message_id, "labelIds": ["INBOX", "UNREAD"]}
         return m
 
     with patch.object(gmail_client_service, "_make_api_request", side_effect=mock_api):
