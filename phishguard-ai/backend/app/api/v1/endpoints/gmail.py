@@ -18,13 +18,13 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select, update, func, desc
+from sqlalchemy import select, update, delete, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from urllib.parse import quote_plus
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models import GmailIntegration, GmailMessage, Email, User, OAuthState
+from app.models import GmailIntegration, GmailMessage, Email, User, OAuthState, AuditLog
 from app.security.auth import get_current_user
 from app.services.gmail_oauth_service import (
     gmail_oauth_service,
