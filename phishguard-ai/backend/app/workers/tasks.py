@@ -466,3 +466,121 @@ def sync_gmail_account_task(
     except Exception as exc:
         logger.error("sync_gmail_account_task error: %s", exc)
         raise self.retry(exc=exc, countdown=15 * (2 ** self.request.retries))
+
+
+async def execute_gmail_history_sync(
+    integration_id: str,
+    start_history_id: Optional[str] = None,
+) -> dict:
+    """Executes asynchronous Gmail history synchronization."""
+    from app.services.gmail_client_service import gmail_client_service
+    from app.models import GmailIntegration, User
+
+    async with AsyncSessionLocal() as session:
+        int_res = await session.execute(
+            select(GmailIntegration).where(
+                GmailIntegration.id == uuid.UUID(integration_id),
+            )
+        )
+        integration = int_res.scalar_one_or_none()
+        if not integration or not integration.is_connected:
+            return {"status": "skipped", "reason": "Integration not active or connected"}
+
+        user_res = await session.execute(
+            select(User).where(User.id == integration.user_id)
+        )
+        user = user_res.scalar_one_or_none()
+        if not user:
+            return {"status": "error", "reason": "User not found"}
+
+        return await gmail_client_service.sync_history(
+            db=session,
+            user=user,
+            integration=integration,
+            start_history_id=start_history_id,
+        )
+
+
+@celery_app.task(name="app.workers.tasks.sync_gmail_history_task", bind=True, max_retries=3, default_retry_delay=10)
+def sync_gmail_history_task(self, integration_id: str, start_history_id: Optional[str] = None):
+    """Celery background worker task for syncing Gmail history changes."""
+    try:
+        return asyncio.run(execute_gmail_history_sync(integration_id, start_history_id))
+    except Exception as exc:
+        logger.error("sync_gmail_history_task error for %s: %s", integration_id, exc)
+        raise self.retry(exc=exc, countdown=10 * (2 ** self.request.retries))
+
+
+async def execute_renew_gmail_watches() -> dict:
+    """Renews Gmail watches for all active connections approaching expiration."""
+    from app.services.gmail_client_service import gmail_client_service
+    from app.models import GmailIntegration
+    from datetime import timedelta
+
+    renewed = 0
+    failed = 0
+    now = datetime.now(timezone.utc)
+    # Renew if active or expiring within 48 hours
+    renew_threshold = now + timedelta(hours=48)
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(GmailIntegration).where(
+            GmailIntegration.is_connected == True,
+            GmailIntegration.refresh_token_encrypted.isnot(None),
+            (GmailIntegration.watch_status == "active") | (GmailIntegration.watch_expiration <= renew_threshold),
+        )
+        res = await session.execute(stmt)
+        integrations = res.scalars().all()
+
+        for intg in integrations:
+            try:
+                await gmail_client_service.watch_inbox(session, intg)
+                renewed += 1
+            except Exception as e:
+                logger.error("Watch renewal failed for %s: %s", intg.email_address, e)
+                failed += 1
+
+    return {"renewed": renewed, "failed": failed}
+
+
+@celery_app.task(name="app.workers.tasks.renew_gmail_watches_task")
+def renew_gmail_watches_task():
+    """Daily scheduled background task to renew Gmail push notification watches."""
+    return asyncio.run(execute_renew_gmail_watches())
+
+
+async def execute_reconcile_gmail_connections() -> dict:
+    """Periodic reconciliation task to catch any delayed or dropped notifications."""
+    from app.services.gmail_client_service import gmail_client_service
+    from app.models import GmailIntegration, User
+
+    reconciled = 0
+    errors = 0
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(GmailIntegration).where(
+            GmailIntegration.is_connected == True,
+            GmailIntegration.watch_status == "active",
+        )
+        res = await session.execute(stmt)
+        integrations = res.scalars().all()
+
+        for intg in integrations:
+            try:
+                user_res = await session.execute(select(User).where(User.id == intg.user_id))
+                user = user_res.scalar_one_or_none()
+                if not user:
+                    continue
+                await gmail_client_service.sync_history(session, user, intg)
+                reconciled += 1
+            except Exception as e:
+                logger.warning("Periodic reconciliation error for %s: %s", intg.email_address, e)
+                errors += 1
+
+    return {"reconciled": reconciled, "errors": errors}
+
+
+@celery_app.task(name="app.workers.tasks.reconcile_gmail_connections_task")
+def reconcile_gmail_connections_task():
+    """Periodic task to reconcile Gmail history changes in case push was dropped."""
+    return asyncio.run(execute_reconcile_gmail_connections())

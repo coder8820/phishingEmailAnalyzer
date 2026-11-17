@@ -455,5 +455,327 @@ class GmailClientService:
             "message": f"Successfully retrieved {len(synced_records)} new messages from Gmail INBOX ({skipped_count} existing skipped).",
         }
 
+    async def get_profile(
+        self,
+        db: AsyncSession,
+        integration: GmailIntegration,
+    ) -> Dict[str, Any]:
+        """Fetches profile for connected Gmail account to retrieve email and latest historyId."""
+        resp = await self._make_api_request(
+            db=db,
+            integration=integration,
+            method="GET",
+            url=GMAIL_PROFILE_ENDPOINT,
+        )
+        return resp.json()
+
+    async def watch_inbox(
+        self,
+        db: AsyncSession,
+        integration: GmailIntegration,
+        topic_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Activates real-time Gmail push notifications via Google Cloud Pub/Sub.
+        Configures watch for INBOX label only with least privilege.
+        Saves returned historyId and expiration.
+        """
+        topic = topic_name or settings.GMAIL_PUBSUB_TOPIC
+        if not topic:
+            raise GmailWatchError(
+                "Google Cloud Pub/Sub topic is not configured. Please set GMAIL_PUBSUB_TOPIC in settings."
+            )
+
+        payload: Dict[str, Any] = {
+            "topicName": topic,
+            "labelIds": ["INBOX"],
+            "labelFilterAction": "include",
+        }
+
+        try:
+            resp = await self._make_api_request(
+                db=db,
+                integration=integration,
+                method="POST",
+                url=GMAIL_WATCH_ENDPOINT,
+                json_data=payload,
+            )
+            data = resp.json()
+            history_id = data.get("historyId")
+            expiration_ms = data.get("expiration")
+            expiration_dt = None
+            if expiration_ms:
+                try:
+                    expiration_dt = datetime.fromtimestamp(int(expiration_ms) / 1000.0, tz=timezone.utc)
+                except Exception:
+                    pass
+
+            if history_id:
+                integration.last_history_id = str(history_id)
+            if expiration_dt:
+                integration.watch_expiration = expiration_dt
+            integration.watch_status = "active"
+            integration.last_error = None
+            await db.commit()
+
+            logger.info(
+                "Gmail watch successfully established for %s: historyId=%s, expiration=%s",
+                integration.email_address, history_id, expiration_dt
+            )
+            return {
+                "status": "active",
+                "history_id": str(history_id) if history_id else None,
+                "expiration": expiration_dt.isoformat() if expiration_dt else None,
+                "topic": topic,
+            }
+        except Exception as e:
+            logger.error("Failed to establish Gmail watch for %s: %s", integration.email_address, e)
+            integration.watch_status = "error"
+            integration.last_error = str(e)
+            await db.commit()
+            raise
+
+    async def stop_watch(
+        self,
+        db: AsyncSession,
+        integration: GmailIntegration,
+    ) -> Dict[str, Any]:
+        """Stops active Gmail push notifications for the connected account."""
+        try:
+            await self._make_api_request(
+                db=db,
+                integration=integration,
+                method="POST",
+                url=GMAIL_STOP_WATCH_ENDPOINT,
+            )
+        except Exception as e:
+            logger.warning("Stop watch API returned warning for %s: %s", integration.email_address, e)
+
+        integration.watch_status = "inactive"
+        integration.watch_expiration = None
+        await db.commit()
+        logger.info("Gmail watch stopped for %s", integration.email_address)
+        return {"status": "inactive", "message": "Gmail push notifications stopped successfully."}
+
+    async def sync_history(
+        self,
+        db: AsyncSession,
+        user: User,
+        integration: GmailIntegration,
+        start_history_id: Optional[str] = None,
+        max_pages: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        Synchronizes new incoming emails using the Gmail History API.
+        1. Queries changes since startHistoryId (or integration.last_history_id).
+        2. Filters strictly for messagesAdded with label 'INBOX', excluding Spam/Trash/Drafts/Sent.
+        3. Falls back to controlled Inbox reconciliation on HTTP 404 (expired history).
+        4. Idempotently skips already-processed messages.
+        5. Losslessly fetches raw RFC-822 MIME bytes and drives EmailParser.
+        6. Updates integration.last_history_id and last_synced_at.
+        """
+        start_hid = start_history_id or integration.last_history_id
+        if not start_hid:
+            logger.info("No startHistoryId for %s; performing controlled inbox reconciliation", integration.email_address)
+            res = await self.sync_inbox(db=db, user=user, integration=integration, max_messages=25)
+            try:
+                prof = await self.get_profile(db=db, integration=integration)
+                if prof.get("historyId"):
+                    integration.last_history_id = str(prof["historyId"])
+                    await db.commit()
+            except Exception:
+                pass
+            return res
+
+        page_token: Optional[str] = None
+        collected_message_ids: List[str] = []
+        latest_history_id = start_hid
+
+        try:
+            for _ in range(max_pages):
+                params: Dict[str, Any] = {
+                    "startHistoryId": start_hid,
+                    "labelId": "INBOX",
+                    "historyTypes": "messageAdded",
+                    "maxResults": 50,
+                }
+                if page_token:
+                    params["pageToken"] = page_token
+
+                resp = await self._make_api_request(
+                    db=db,
+                    integration=integration,
+                    method="GET",
+                    url=GMAIL_HISTORY_ENDPOINT,
+                    params=params,
+                )
+                data = resp.json()
+                latest_history_id = str(data.get("historyId", latest_history_id))
+                history_records = data.get("history", [])
+
+                for item in history_records:
+                    for added in item.get("messagesAdded", []):
+                        msg_meta = added.get("message", {})
+                        mid = msg_meta.get("id")
+                        if not mid:
+                            continue
+                        labels = set(msg_meta.get("labelIds", []))
+                        # Strictly verify INBOX label and absence of excluded folders
+                        if "INBOX" in labels and not bool(labels.intersection(EXCLUDED_LABELS)):
+                            collected_message_ids.append(mid)
+
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+
+        except GmailHistoryExpiredError:
+            logger.warning(
+                "Gmail History ID %s expired (HTTP 404) for %s; performing controlled INBOX reconciliation",
+                start_hid, integration.email_address
+            )
+            res = await self.sync_inbox(db=db, user=user, integration=integration, max_messages=25)
+            try:
+                prof = await self.get_profile(db=db, integration=integration)
+                if prof.get("historyId"):
+                    integration.last_history_id = str(prof["historyId"])
+                    await db.commit()
+            except Exception:
+                pass
+            res["reconciled_after_expiration"] = True
+            return res
+
+        # Deduplicate collected message IDs preserving order
+        seen = set()
+        unique_ids = []
+        for mid in collected_message_ids:
+            if mid not in seen:
+                seen.add(mid)
+                unique_ids.append(mid)
+
+        if not unique_ids:
+            integration.last_history_id = latest_history_id
+            integration.last_synced_at = datetime.now(timezone.utc)
+            await db.commit()
+            return {
+                "synced_count": 0,
+                "skipped_count": 0,
+                "history_id": latest_history_id,
+                "message": "History synchronization complete. No new INBOX messages added.",
+            }
+
+        # Check database for existing messages to enforce strong idempotency
+        existing_stmt = select(GmailMessage.gmail_message_id).where(
+            GmailMessage.integration_id == integration.id,
+            GmailMessage.gmail_message_id.in_(unique_ids),
+        )
+        existing_res = await db.execute(existing_stmt)
+        existing_ids = set(existing_res.scalars().all())
+
+        new_ids = [mid for mid in unique_ids if mid not in existing_ids]
+        skipped_count = len(unique_ids) - len(new_ids)
+
+        # Retrieve and persist with bounded concurrency
+        semaphore = asyncio.Semaphore(5)
+        parser = EmailParser()
+        synced_records: List[GmailMessage] = []
+        new_email_ids: List[uuid.UUID] = []
+
+        async def fetch_and_persist(mid: str) -> Optional[GmailMessage]:
+            async with semaphore:
+                try:
+                    raw_data = await self.get_message_raw(db, integration, mid)
+                except Exception as e:
+                    logger.warning("Failed to fetch message %s from Gmail: %s", mid, e)
+                    return None
+
+                raw_bytes = raw_data["raw_bytes"]
+                if not raw_bytes:
+                    return None
+
+                try:
+                    parsed_email: ParsedEmail = parser.parse(raw_bytes)
+                except Exception as e:
+                    logger.error("EmailParser failed on message %s: %s", mid, e)
+                    return None
+
+                raw_eml_text = raw_bytes.decode("utf-8", errors="replace")
+
+                email_record = Email(
+                    id=uuid.uuid4(),
+                    organization_id=user.organization_id,
+                    submitted_by=user.id,
+                    message_id=parsed_email.message_id or f"gmail-{mid}",
+                    subject=parsed_email.subject or "(No Subject)",
+                    sender_raw=parsed_email.from_raw or "(Unknown Sender)",
+                    sender_email=parsed_email.from_email or "",
+                    sender_display_name=parsed_email.from_display_name,
+                    reply_to=parsed_email.reply_to,
+                    return_path=parsed_email.return_path,
+                    recipient_to=parsed_email.to_addresses or [],
+                    recipient_cc=parsed_email.cc_addresses or [],
+                    received_at=raw_data["internalDate"] or parsed_email.date or datetime.now(timezone.utc),
+                    source_type="gmail_sync",
+                    raw_content=raw_eml_text,
+                    file_size_bytes=len(raw_bytes),
+                    original_filename=f"gmail_{mid}.eml",
+                    analysis_status="pending",
+                )
+                db.add(email_record)
+                await db.flush()
+
+                gmsg = GmailMessage(
+                    id=uuid.uuid4(),
+                    organization_id=user.organization_id,
+                    user_id=user.id,
+                    integration_id=integration.id,
+                    gmail_message_id=mid,
+                    thread_id=raw_data["threadId"],
+                    label_ids=raw_data["labelIds"],
+                    internal_date=raw_data["internalDate"],
+                    subject=parsed_email.subject or "(No Subject)",
+                    sender=parsed_email.from_raw or "(Unknown Sender)",
+                    snippet=raw_data["snippet"],
+                    body_text=parsed_email.body_text[:2000] if parsed_email.body_text else "",
+                    raw_eml=raw_eml_text,
+                    received_at=raw_data["internalDate"] or parsed_email.date or datetime.now(timezone.utc),
+                    is_analyzed=False,
+                    analysis_status="pending",
+                    email_id=email_record.id,
+                )
+                db.add(gmsg)
+                return gmsg
+
+        for mid in new_ids:
+            rec = await fetch_and_persist(mid)
+            if rec:
+                synced_records.append(rec)
+                if rec.email_id:
+                    new_email_ids.append(rec.email_id)
+
+        integration.last_history_id = latest_history_id
+        integration.last_synced_at = datetime.now(timezone.utc)
+        await db.commit()
+
+        # Trigger analysis for new messages if auto_analyze is enabled
+        if integration.auto_analyze_enabled and new_email_ids:
+            from app.workers.tasks import analyze_email_task, execute_email_analysis
+            for eid in new_email_ids:
+                try:
+                    analyze_email_task.delay(str(eid), str(user.organization_id))
+                except Exception:
+                    asyncio.create_task(execute_email_analysis(str(eid), str(user.organization_id)))
+
+        logger.info(
+            "Gmail history sync complete for %s: %d new, %d skipped, new historyId=%s",
+            integration.email_address, len(synced_records), skipped_count, latest_history_id
+        )
+
+        return {
+            "synced_count": len(synced_records),
+            "skipped_count": skipped_count,
+            "history_id": latest_history_id,
+            "message": f"Successfully retrieved {len(synced_records)} new messages via History API ({skipped_count} skipped).",
+        }
+
 
 gmail_client_service = GmailClientService()
