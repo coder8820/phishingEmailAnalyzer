@@ -478,6 +478,14 @@ export function GmailDefenseHub() {
                     <Radio className={cn("w-2.5 h-2.5", status.watch_status === 'active' && "animate-pulse text-purple-400")} />
                     Watch: {status.watch_status ? status.watch_status.toUpperCase() : 'INACTIVE'}
                   </span>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-navy-800 text-slate-300 border border-navy-700" title={status.last_synced_at ? `Last synced: ${new Date(status.last_synced_at).toLocaleString()}` : "Never synced"}>
+                    Synced: {status.last_synced_at ? new Date(status.last_synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Never'}
+                  </span>
+                  {status.watch_expiration && (
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-navy-800 text-slate-400 border border-navy-700" title={`Watch renews/expires: ${new Date(status.watch_expiration).toLocaleString()}`}>
+                      Expires: {new Date(status.watch_expiration).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                    </span>
+                  )}
                 </div>
               ) : (
                 <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-mono bg-slate-500/15 text-slate-400 border border-slate-600/30">
@@ -614,6 +622,15 @@ export function GmailDefenseHub() {
                 </button>
               )}
 
+              {/* Privacy & Data Settings */}
+              <button
+                onClick={handleOpenPrivacyModal}
+                className="p-2 text-slate-400 hover:text-slate-200 hover:bg-navy-800 rounded-xl border border-navy-700 transition-colors"
+                title="Privacy, Data Retention & Erasure Settings"
+              >
+                <FileText className="w-4 h-4" />
+              </button>
+
               {/* Disconnect */}
               <button
                 onClick={handleDisconnect}
@@ -649,7 +666,7 @@ export function GmailDefenseHub() {
       {status?.is_connected ? (
         <div className="mt-6 space-y-6">
           {/* Quick Stats Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3.5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5">
             <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
               <div>
                 <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Total Synced</p>
@@ -661,14 +678,21 @@ export function GmailDefenseHub() {
             <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
               <div>
                 <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Analyzed</p>
-                <p className="text-xl font-bold font-mono text-emerald-400 mt-1">{status.analyzed_messages}</p>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <p className="text-xl font-bold font-mono text-emerald-400">{status.analyzed_messages}</p>
+                  {(status.failed_analyses || 0) > 0 && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30" title={`${status.failed_analyses} failed analyses`}>
+                      {status.failed_analyses} fail
+                    </span>
+                  )}
+                </div>
               </div>
               <CheckCircle2 className="w-5 h-5 text-emerald-500" />
             </div>
 
             <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Pending Review</p>
+                <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Pending</p>
                 <p className="text-xl font-bold font-mono text-yellow-400 mt-1">{status.pending_messages}</p>
               </div>
               <Clock className="w-5 h-5 text-yellow-500" />
@@ -676,10 +700,18 @@ export function GmailDefenseHub() {
 
             <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Hostile Threats</p>
+                <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Hostile Phish</p>
                 <p className="text-xl font-bold font-mono text-red-400 mt-1">{status.critical_threats}</p>
               </div>
               <Flame className="w-5 h-5 text-red-500" />
+            </div>
+
+            <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Suspicious</p>
+                <p className="text-xl font-bold font-mono text-amber-400 mt-1">{status.suspicious_threats || 0}</p>
+              </div>
+              <AlertTriangle className="w-5 h-5 text-amber-500" />
             </div>
 
             <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
@@ -688,7 +720,7 @@ export function GmailDefenseHub() {
                 <div className="flex items-center gap-1.5 mt-1">
                   <p className="text-xl font-bold font-mono text-purple-400">{status.quarantined_messages || 0}</p>
                   {(status.failed_quarantines || 0) > 0 && (
-                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-red-500/20 text-red-400 border border-red-500/30">
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-red-500/20 text-red-400 border border-red-500/30" title={`${status.failed_quarantines} quarantine errors`}>
                       {status.failed_quarantines} err
                     </span>
                   )}
@@ -697,6 +729,16 @@ export function GmailDefenseHub() {
               <ShieldAlert className="w-5 h-5 text-purple-400" />
             </div>
           </div>
+
+          {/* Sync Warning Banner if failure recorded */}
+          {status.last_error && (
+            <div className="flex items-center gap-3 p-3.5 bg-red-500/10 border border-red-500/30 rounded-xl text-xs font-mono text-red-300">
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+              <div className="flex-1">
+                <strong>Synchronization Warning:</strong> {status.last_error}
+              </div>
+            </div>
+          )}
 
           {/* Filter Bar */}
           <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 bg-navy-800/50 p-3 rounded-xl border border-navy-700/50">
@@ -1323,6 +1365,93 @@ export function GmailDefenseHub() {
                   <CheckCircle2 className="w-3.5 h-3.5" />
                 )}
                 <span>{submittingFP ? 'Reporting...' : 'Confirm False Positive & Restore'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Privacy & Data Management Modal (G6 Requirement 4) */}
+      {showPrivacyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="relative w-full max-w-lg bg-navy-850 border border-navy-700 rounded-2xl p-6 shadow-2xl">
+            <button
+              onClick={() => {
+                setShowPrivacyModal(false)
+                setDeletionConfirmText('')
+              }}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2.5 bg-blue-500/15 border border-blue-500/30 rounded-xl text-blue-300">
+                <FileText className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white font-mono">
+                  Gmail Privacy & Data Retention
+                </h3>
+                <p className="text-xs text-slate-400 font-mono">
+                  User rights, data retention policies & right to erasure
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3.5 text-xs text-slate-300 font-sans leading-relaxed">
+              <div className="bg-navy-900 border border-navy-700/80 rounded-xl p-3.5 space-y-2 font-mono text-[11px]">
+                <p className="text-slate-400">
+                  <strong>Google Limited Use Compliance:</strong> PhishGuard AI's use and transfer of information received from Google APIs strictly adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noreferrer" className="text-accent-blue underline">Google API Services User Data Policy</a>.
+                </p>
+                <div className="pt-2 border-t border-navy-800 space-y-1">
+                  <p><span className="text-slate-400">Raw MIME Byte Retention:</span> <span className="text-white font-medium">{privacyPolicy?.data_retention_days?.raw_mime_content ?? 30} days</span></p>
+                  <p><span className="text-slate-400">Metadata & Audit Retention:</span> <span className="text-white font-medium">{privacyPolicy?.data_retention_days?.message_metadata ?? 90} days</span></p>
+                  <p><span className="text-slate-400">Auto-Restore on Deletion:</span> <span className="text-emerald-400 font-medium">{privacyPolicy?.auto_restore_on_deletion ? 'Enabled (quarantined messages restored to INBOX)' : 'Disabled'}</span></p>
+                </div>
+              </div>
+
+              {/* Data Deletion Danger Zone */}
+              <div className="p-3.5 bg-red-500/10 border border-red-500/30 rounded-xl space-y-2.5">
+                <div className="flex items-center gap-2 text-red-300 font-mono text-xs font-bold">
+                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                  <span>Right to Erasure (Purge Synced Data)</span>
+                </div>
+                <p className="text-[11px] text-slate-400 font-mono leading-normal">
+                  Type <code className="text-white bg-navy-900 px-1 py-0.5 rounded">CONFIRM_DELETE</code> or your email (<code className="text-red-300 bg-navy-900 px-1 py-0.5 rounded">{status?.email_address}</code>) to permanently delete all synced message records and revoke OAuth access:
+                </p>
+                <input
+                  type="text"
+                  value={deletionConfirmText}
+                  onChange={(e) => setDeletionConfirmText(e.target.value)}
+                  placeholder="CONFIRM_DELETE"
+                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-3 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-red-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleDeleteDataSubmit}
+                  disabled={isDeletingData || (deletionConfirmText !== 'CONFIRM_DELETE' && deletionConfirmText !== status?.email_address)}
+                  className="w-full flex items-center justify-center gap-2 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-mono font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {isDeletingData ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Power className="w-3.5 h-3.5" />
+                  )}
+                  <span>{isDeletingData ? 'Purging & Revoking...' : 'Execute Data Deletion & Revoke Access'}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 mt-5 pt-4 border-t border-navy-700/70">
+              <button
+                onClick={() => {
+                  setShowPrivacyModal(false)
+                  setDeletionConfirmText('')
+                }}
+                className="px-4 py-2 bg-navy-800 hover:bg-navy-750 text-slate-300 rounded-xl text-xs font-mono transition-colors"
+              >
+                Close
               </button>
             </div>
           </div>
