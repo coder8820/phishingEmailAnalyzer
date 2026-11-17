@@ -358,7 +358,7 @@ async def execute_email_analysis(email_id: str, organization_id: str) -> None:
             email_record.analysis_status = "complete"
 
             # If linked to a GmailMessage, update the GmailMessage with verified pipeline risk metrics
-            from app.models import GmailMessage
+            from app.models import GmailMessage, GmailIntegration, User
             gmail_msg_res = await session.execute(
                 select(GmailMessage).where(GmailMessage.email_id == email_record.id)
             )
@@ -368,6 +368,44 @@ async def execute_email_analysis(email_id: str, organization_id: str) -> None:
                 gmsg.analysis_status = "analyzed"
                 gmsg.risk_score = score_result.score
                 gmsg.risk_classification = score_result.classification.capitalize() if score_result.classification else "Safe"
+
+                # Check if automatic quarantine is enabled on the integration
+                integ_res = await session.execute(
+                    select(GmailIntegration).where(GmailIntegration.id == gmsg.integration_id)
+                )
+                integ = integ_res.scalar_one_or_none()
+                if integ and integ.auto_quarantine_enabled:
+                    from app.services.gmail_client_service import gmail_client_service
+                    user_res = await session.execute(
+                        select(User).where(User.id == gmsg.user_id)
+                    )
+                    user_obj = user_res.scalar_one_or_none()
+                    if user_obj:
+                        threshold = integ.quarantine_threshold_score or 70
+                        eligible, decision, reason = gmail_client_service.evaluate_quarantine_policy(
+                            gmail_msg=gmsg,
+                            analysis=analysis_record,
+                            threshold_score=threshold,
+                        )
+                        if eligible and decision == "quarantine":
+                            try:
+                                await gmail_client_service.quarantine_message(
+                                    db=session,
+                                    user=user_obj,
+                                    integration=integ,
+                                    gmail_msg=gmsg,
+                                    reason=reason,
+                                    is_automatic=True,
+                                )
+                                logger.info(
+                                    "auto_quarantine_executed for message %s (score=%s)",
+                                    gmsg.gmail_message_id, gmsg.risk_score
+                                )
+                            except Exception as q_err:
+                                logger.error(
+                                    "auto_quarantine_failed for message %s: %s",
+                                    gmsg.gmail_message_id, q_err
+                                )
 
             await session.commit()
             logger.info("analysis_completed_successfully for %s, risk_score=%s", email_id, score_result.score)

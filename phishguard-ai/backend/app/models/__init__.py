@@ -619,6 +619,10 @@ class GmailIntegration(Base):
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
     last_history_id = Column(String(64), nullable=True)
     quarantine_label_id = Column(String(100), nullable=True)
+    quarantine_label_name = Column(String(100), default="PhishGuard-Quarantine", nullable=False)
+    auto_quarantine_enabled = Column(Boolean, default=False, nullable=False)
+    quarantine_consent_given_at = Column(DateTime(timezone=True), nullable=True)
+    quarantine_threshold_score = Column(Integer, default=70, nullable=False)
     watch_status = Column(String(50), default="inactive", nullable=False)        # active | inactive | expired | error
     watch_expiration = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
@@ -682,6 +686,16 @@ class GmailMessage(Base):
     risk_classification = Column(String(50), nullable=True)  # Safe | Suspicious | Malicious | Critical
     email_id = Column(UUID(as_uuid=True), ForeignKey("emails.id", ondelete="SET NULL"), nullable=True)
     error_message = Column(Text, nullable=True)
+
+    # Quarantine tracking
+    is_quarantined = Column(Boolean, default=False, nullable=False)
+    quarantined_at = Column(DateTime(timezone=True), nullable=True)
+    quarantine_reason = Column(Text, nullable=True)
+    original_labels = Column(JSONB, nullable=True, default=list)
+    restored_at = Column(DateTime(timezone=True), nullable=True)
+    restored_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    quarantine_action_status = Column(String(50), default="none", nullable=False)  # none | quarantined | restored | failed
+    quarantine_error = Column(Text, nullable=True)
 
     created_at = now_utc()
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

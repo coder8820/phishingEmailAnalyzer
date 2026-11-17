@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analyzers.email_parser import EmailParser, ParsedEmail
 from app.core.config import settings
-from app.models import GmailIntegration, GmailMessage, Email, User
+from app.models import GmailIntegration, GmailMessage, Email, User, AuditLog
 from app.services.gmail_oauth_service import (
     gmail_oauth_service,
     GoogleOAuthError,
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Google Gmail API v1 Endpoints
 GMAIL_MESSAGES_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+GMAIL_LABELS_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/labels"
 GMAIL_PROFILE_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 GMAIL_WATCH_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/watch"
 GMAIL_STOP_WATCH_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/stop"
@@ -77,6 +78,11 @@ class GmailWatchError(GmailAPIError):
 
 class GmailHistoryExpiredError(GmailAPIError):
     """Raised when startHistoryId is too old or invalid and Google returns HTTP 404."""
+    pass
+
+
+class GmailQuarantineError(GmailAPIError):
+    """Raised when message quarantine or label operations fail."""
     pass
 
 
@@ -776,6 +782,392 @@ class GmailClientService:
             "history_id": latest_history_id,
             "message": f"Successfully retrieved {len(synced_records)} new messages via History API ({skipped_count} skipped).",
         }
+
+    async def get_or_create_quarantine_label(
+        self,
+        db: AsyncSession,
+        integration: GmailIntegration,
+        label_name: str = "PhishGuard-Quarantine",
+    ) -> str:
+        """
+        Retrieves the ID of the PhishGuard quarantine label from Google Gmail API.
+        Creates the label if it does not yet exist.
+        Caches the label ID on the GmailIntegration record.
+        """
+        # 1. Check if cached label ID is already valid
+        if integration.quarantine_label_id:
+            try:
+                resp = await self._make_api_request(
+                    db=db,
+                    integration=integration,
+                    method="GET",
+                    url=f"{GMAIL_LABELS_ENDPOINT}/{integration.quarantine_label_id}",
+                )
+                if resp.status_code == 200:
+                    return integration.quarantine_label_id
+            except GmailAPIError:
+                logger.warning(
+                    "Cached quarantine label ID %s invalid for %s; re-querying labels.",
+                    integration.quarantine_label_id, integration.email_address
+                )
+                integration.quarantine_label_id = None
+
+        # 2. Query all existing labels
+        resp = await self._make_api_request(
+            db=db,
+            integration=integration,
+            method="GET",
+            url=GMAIL_LABELS_ENDPOINT,
+        )
+        labels_list = resp.json().get("labels", [])
+        for lbl in labels_list:
+            if lbl.get("name", "").lower() == label_name.lower():
+                integration.quarantine_label_id = lbl["id"]
+                integration.quarantine_label_name = lbl["name"]
+                await db.commit()
+                return lbl["id"]
+
+        # 3. Create the label if not found
+        try:
+            create_resp = await self._make_api_request(
+                db=db,
+                integration=integration,
+                method="POST",
+                url=GMAIL_LABELS_ENDPOINT,
+                json_data={
+                    "name": label_name,
+                    "labelListVisibility": "labelShow",
+                    "messageListVisibility": "show",
+                },
+            )
+            created_data = create_resp.json()
+            created_id = created_data["id"]
+            integration.quarantine_label_id = created_id
+            integration.quarantine_label_name = label_name
+            await db.commit()
+            logger.info("Created Gmail quarantine label '%s' (ID: %s) for %s", label_name, created_id, integration.email_address)
+            return created_id
+        except GmailAPIError as e:
+            # If race condition caused conflict (409), re-fetch
+            if getattr(e, "status_code", None) == 409 or "already exists" in str(e).lower():
+                list_resp = await self._make_api_request(
+                    db=db,
+                    integration=integration,
+                    method="GET",
+                    url=GMAIL_LABELS_ENDPOINT,
+                )
+                for lbl in list_resp.json().get("labels", []):
+                    if lbl.get("name", "").lower() == label_name.lower():
+                        integration.quarantine_label_id = lbl["id"]
+                        integration.quarantine_label_name = lbl["name"]
+                        await db.commit()
+                        return lbl["id"]
+            raise
+
+    async def quarantine_message(
+        self,
+        db: AsyncSession,
+        user: User,
+        integration: GmailIntegration,
+        gmail_msg: GmailMessage,
+        reason: str,
+        is_automatic: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Safely quarantines a phishing email in Gmail:
+        - Adds 'PhishGuard-Quarantine' label
+        - Removes 'INBOX' label
+        - Stores original labels prior to modification
+        - Fully idempotent: duplicate executions are safe
+        - Never permanently deletes the message
+        - Records operation in immutable AuditLog
+        """
+        # Validate tenant isolation
+        if gmail_msg.organization_id != user.organization_id or gmail_msg.integration_id != integration.id:
+            raise GmailPermissionError("Access denied: message does not belong to user's organization or Gmail integration.")
+
+        # Check required scope
+        granted = integration.granted_scopes or []
+        if not any("gmail.modify" in s for s in granted):
+            raise GmailPermissionError(
+                "Missing required scope 'https://www.googleapis.com/auth/gmail.modify'. "
+                "Please reconnect Gmail with modify permissions to enable quarantine."
+            )
+
+        # Preserve original labels before any modification
+        current_labels = list(gmail_msg.label_ids or [])
+        if not gmail_msg.original_labels:
+            gmail_msg.original_labels = current_labels
+
+        quarantine_label_name = integration.quarantine_label_name or "PhishGuard-Quarantine"
+
+        # Fast idempotency check: already quarantined?
+        if (
+            gmail_msg.is_quarantined
+            and "INBOX" not in current_labels
+            and (not integration.quarantine_label_id or integration.quarantine_label_id in current_labels)
+        ):
+            return {
+                "status": "already_quarantined",
+                "gmail_message_id": gmail_msg.gmail_message_id,
+                "label_ids": gmail_msg.label_ids,
+                "quarantined_at": gmail_msg.quarantined_at.isoformat() if gmail_msg.quarantined_at else None,
+                "message": f"Email is already quarantined with label '{quarantine_label_name}'.",
+            }
+
+        quarantine_label_id = await self.get_or_create_quarantine_label(db, integration, quarantine_label_name)
+
+        url = f"{GMAIL_MESSAGES_ENDPOINT}/{gmail_msg.gmail_message_id}/modify"
+        body = {
+            "addLabelIds": [quarantine_label_id],
+            "removeLabelIds": ["INBOX"],
+        }
+
+        try:
+            resp = await self._make_api_request(
+                db=db,
+                integration=integration,
+                method="POST",
+                url=url,
+                json_data=body,
+            )
+            res_data = resp.json()
+            updated_labels = res_data.get("labelIds", [])
+
+            now_dt = datetime.now(timezone.utc)
+            gmail_msg.label_ids = updated_labels
+            gmail_msg.is_quarantined = True
+            gmail_msg.quarantined_at = now_dt
+            gmail_msg.quarantine_reason = reason
+            gmail_msg.quarantine_action_status = "quarantined"
+            gmail_msg.quarantine_error = None
+
+            # Record AuditLog
+            audit = AuditLog(
+                organization_id=user.organization_id,
+                user_id=user.id,
+                action="gmail.message.quarantine",
+                resource_type="gmail_message",
+                resource_id=gmail_msg.id,
+                details={
+                    "gmail_message_id": gmail_msg.gmail_message_id,
+                    "subject": gmail_msg.subject,
+                    "sender": gmail_msg.sender,
+                    "risk_score": gmail_msg.risk_score,
+                    "risk_classification": gmail_msg.risk_classification,
+                    "reason": reason,
+                    "is_automatic": is_automatic,
+                    "quarantine_label_id": quarantine_label_id,
+                    "quarantine_label_name": quarantine_label_name,
+                },
+                severity="warning" if is_automatic else "info",
+            )
+            db.add(audit)
+            await db.commit()
+
+            logger.info(
+                "Successfully quarantined Gmail message %s for user %s (%s)",
+                gmail_msg.gmail_message_id, user.id, reason
+            )
+
+            return {
+                "status": "quarantined",
+                "gmail_message_id": gmail_msg.gmail_message_id,
+                "label_ids": updated_labels,
+                "quarantined_at": now_dt.isoformat(),
+                "quarantine_reason": reason,
+                "is_automatic": is_automatic,
+                "message": f"Email successfully moved from INBOX to {quarantine_label_name}.",
+            }
+
+        except Exception as e:
+            gmail_msg.quarantine_action_status = "failed"
+            gmail_msg.quarantine_error = str(e)
+            try:
+                audit_err = AuditLog(
+                    organization_id=user.organization_id,
+                    user_id=user.id,
+                    action="gmail.message.quarantine_failed",
+                    resource_type="gmail_message",
+                    resource_id=gmail_msg.id,
+                    details={
+                        "gmail_message_id": gmail_msg.gmail_message_id,
+                        "error": str(e),
+                        "is_automatic": is_automatic,
+                    },
+                    severity="error",
+                )
+                db.add(audit_err)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+
+            logger.error("Failed to quarantine Gmail message %s: %s", gmail_msg.gmail_message_id, e)
+            raise
+
+    async def restore_message(
+        self,
+        db: AsyncSession,
+        user: User,
+        integration: GmailIntegration,
+        gmail_msg: GmailMessage,
+    ) -> Dict[str, Any]:
+        """
+        Safely restores a previously quarantined email:
+        - Removes 'PhishGuard-Quarantine' label
+        - Restores 'INBOX' label
+        - Preserves the original message completely
+        - Fully idempotent: duplicate restore requests are handled safely
+        - Records operation in immutable AuditLog
+        """
+        # Validate tenant isolation
+        if gmail_msg.organization_id != user.organization_id or gmail_msg.integration_id != integration.id:
+            raise GmailPermissionError("Access denied: message does not belong to user's organization or Gmail integration.")
+
+        # Check required scope
+        granted = integration.granted_scopes or []
+        if not any("gmail.modify" in s for s in granted):
+            raise GmailPermissionError(
+                "Missing required scope 'https://www.googleapis.com/auth/gmail.modify'. "
+                "Please reconnect Gmail with modify permissions to restore messages."
+            )
+
+        quarantine_label_name = integration.quarantine_label_name or "PhishGuard-Quarantine"
+        current_labels = list(gmail_msg.label_ids or [])
+
+        # Fast idempotency check: already restored / in inbox?
+        if (
+            not gmail_msg.is_quarantined
+            and "INBOX" in current_labels
+            and (not integration.quarantine_label_id or integration.quarantine_label_id not in current_labels)
+        ):
+            return {
+                "status": "already_restored",
+                "gmail_message_id": gmail_msg.gmail_message_id,
+                "label_ids": gmail_msg.label_ids,
+                "restored_at": gmail_msg.restored_at.isoformat() if gmail_msg.restored_at else None,
+                "message": "Email is already restored and present in INBOX.",
+            }
+
+        quarantine_label_id = await self.get_or_create_quarantine_label(db, integration, quarantine_label_name)
+
+        url = f"{GMAIL_MESSAGES_ENDPOINT}/{gmail_msg.gmail_message_id}/modify"
+        body = {
+            "addLabelIds": ["INBOX"],
+            "removeLabelIds": [quarantine_label_id],
+        }
+
+        try:
+            resp = await self._make_api_request(
+                db=db,
+                integration=integration,
+                method="POST",
+                url=url,
+                json_data=body,
+            )
+            res_data = resp.json()
+            updated_labels = res_data.get("labelIds", [])
+
+            now_dt = datetime.now(timezone.utc)
+            gmail_msg.label_ids = updated_labels
+            gmail_msg.is_quarantined = False
+            gmail_msg.restored_at = now_dt
+            gmail_msg.restored_by = user.id
+            gmail_msg.quarantine_action_status = "restored"
+            gmail_msg.quarantine_error = None
+
+            # Record AuditLog
+            audit = AuditLog(
+                organization_id=user.organization_id,
+                user_id=user.id,
+                action="gmail.message.restore",
+                resource_type="gmail_message",
+                resource_id=gmail_msg.id,
+                details={
+                    "gmail_message_id": gmail_msg.gmail_message_id,
+                    "subject": gmail_msg.subject,
+                    "restored_by": str(user.id),
+                    "quarantine_label_id": quarantine_label_id,
+                },
+                severity="info",
+            )
+            db.add(audit)
+            await db.commit()
+
+            logger.info("Successfully restored Gmail message %s for user %s", gmail_msg.gmail_message_id, user.id)
+
+            return {
+                "status": "restored",
+                "gmail_message_id": gmail_msg.gmail_message_id,
+                "label_ids": updated_labels,
+                "restored_at": now_dt.isoformat(),
+                "message": f"Email successfully restored from {quarantine_label_name} to INBOX.",
+            }
+
+        except Exception as e:
+            gmail_msg.quarantine_error = str(e)
+            try:
+                audit_err = AuditLog(
+                    organization_id=user.organization_id,
+                    user_id=user.id,
+                    action="gmail.message.restore_failed",
+                    resource_type="gmail_message",
+                    resource_id=gmail_msg.id,
+                    details={
+                        "gmail_message_id": gmail_msg.gmail_message_id,
+                        "error": str(e),
+                    },
+                    severity="error",
+                )
+                db.add(audit_err)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+
+            logger.error("Failed to restore Gmail message %s: %s", gmail_msg.gmail_message_id, e)
+            raise
+
+    def evaluate_quarantine_policy(
+        self,
+        gmail_msg: GmailMessage,
+        analysis: Optional[Any] = None,
+        threshold_score: int = 70,
+    ) -> Tuple[bool, str, str]:
+        """
+        Evaluates detection policy and thresholds for automatic/manual quarantine.
+        Returns: (is_eligible_for_auto_quarantine, decision_category, reason)
+        - decision_category: "quarantine" | "alert_only" | "no_action"
+        """
+        if not gmail_msg.is_analyzed or gmail_msg.analysis_status != "analyzed":
+            return False, "alert_only", "Email analysis is pending or not completed."
+
+        score = gmail_msg.risk_score or 0.0
+
+        # 1. Clean (< 40)
+        if score < 40:
+            return False, "no_action", f"Threat score {int(score)}/100 is low risk. No quarantine action required."
+
+        # 2. Suspicious or uncertain (40 <= score < threshold_score)
+        if score < threshold_score:
+            return False, "alert_only", (
+                f"Threat score {int(score)}/100 is classified as Suspicious. "
+                "Alert generated for manual security analyst review."
+            )
+
+        # 3. High / Critical (score >= threshold_score)
+        # Check fail-safe: Ensure analysis has no critical errors and is not purely caused by missing third-party APIs
+        if analysis:
+            analysis_errors = getattr(analysis, "errors", []) or []
+            if analysis_errors and len(analysis_errors) > 2:
+                return False, "alert_only", (
+                    f"Threat score {int(score)}/100 detected, but analysis had errors ({len(analysis_errors)}). "
+                    "Fail-safe engaged: hold for manual analyst review."
+                )
+
+        return True, "quarantine", (
+            f"Confirmed high-confidence phishing (Score: {int(score)}/100, "
+            f"Classification: {gmail_msg.risk_classification or 'Critical'}). Eligible for quarantine."
+        )
 
 
 gmail_client_service = GmailClientService()

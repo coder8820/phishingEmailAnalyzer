@@ -93,6 +93,16 @@ class PubSubPushRequest(BaseModel):
     subscription: Optional[str] = None
 
 
+class QuarantineConsentRequest(BaseModel):
+    consent_acknowledged: bool = False
+    threshold_score: int = 70
+    quarantine_label_name: Optional[str] = "PhishGuard-Quarantine"
+
+
+class ManualQuarantineRequest(BaseModel):
+    reason: Optional[str] = "Manual quarantine requested by security analyst"
+
+
 # ---------------------------------------------------------------------------
 # Core Analysis Runner for Gmail Message
 # ---------------------------------------------------------------------------
@@ -192,10 +202,18 @@ async def get_gmail_status(
             "last_history_id": None,
             "pubsub_topic": settings.GMAIL_PUBSUB_TOPIC or None,
             "auto_analyze_enabled": False,
+            "auto_quarantine_enabled": False,
+            "quarantine_consent_given_at": None,
+            "quarantine_threshold_score": 70,
+            "quarantine_label_name": "PhishGuard-Quarantine",
+            "quarantine_label_id": None,
             "total_messages": 0,
             "analyzed_messages": 0,
             "pending_messages": 0,
             "critical_threats": 0,
+            "quarantined_messages": 0,
+            "restored_messages": 0,
+            "failed_quarantines": 0,
             "last_synced_at": None,
         })
 
@@ -223,6 +241,30 @@ async def get_gmail_status(
     )
     critical_msgs = critical_q.scalar_one() or 0
 
+    quarantined_q = await db.execute(
+        select(func.count(GmailMessage.id)).where(
+            GmailMessage.integration_id == integration.id,
+            GmailMessage.is_quarantined == True,
+        )
+    )
+    quarantined_msgs = quarantined_q.scalar_one() or 0
+
+    restored_q = await db.execute(
+        select(func.count(GmailMessage.id)).where(
+            GmailMessage.integration_id == integration.id,
+            GmailMessage.quarantine_action_status == "restored",
+        )
+    )
+    restored_msgs = restored_q.scalar_one() or 0
+
+    failed_q = await db.execute(
+        select(func.count(GmailMessage.id)).where(
+            GmailMessage.integration_id == integration.id,
+            GmailMessage.quarantine_action_status == "failed",
+        )
+    )
+    failed_msgs = failed_q.scalar_one() or 0
+
     return success_response({
         "is_connected": integration.is_connected,
         "connection_status": integration.connection_status,
@@ -236,11 +278,19 @@ async def get_gmail_status(
         "last_history_id": integration.last_history_id,
         "pubsub_topic": settings.GMAIL_PUBSUB_TOPIC or None,
         "auto_analyze_enabled": integration.auto_analyze_enabled,
+        "auto_quarantine_enabled": getattr(integration, "auto_quarantine_enabled", False),
+        "quarantine_consent_given_at": integration.quarantine_consent_given_at.isoformat() if getattr(integration, "quarantine_consent_given_at", None) else None,
+        "quarantine_threshold_score": getattr(integration, "quarantine_threshold_score", 70),
+        "quarantine_label_name": getattr(integration, "quarantine_label_name", "PhishGuard-Quarantine"),
+        "quarantine_label_id": getattr(integration, "quarantine_label_id", None),
         "auth_type": integration.auth_type,
         "total_messages": total_msgs,
         "analyzed_messages": analyzed_msgs,
         "pending_messages": total_msgs - analyzed_msgs,
         "critical_threats": critical_msgs,
+        "quarantined_messages": quarantined_msgs,
+        "restored_messages": restored_msgs,
+        "failed_quarantines": failed_msgs,
         "last_synced_at": integration.last_synced_at.isoformat() if integration.last_synced_at else None,
     })
 
@@ -532,6 +582,7 @@ async def get_gmail_messages(
     search: Optional[str] = Query(None, description="Search subject, sender, or snippet"),
     threat_level: Optional[str] = Query(None, description="Filter: all | safe | suspicious | critical"),
     status_filter: Optional[str] = Query(None, description="Filter: all | analyzed | pending"),
+    quarantine_status: Optional[str] = Query(None, description="Filter: all | quarantined | inbox | restored | failed"),
     limit: int = Query(50, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -573,6 +624,16 @@ async def get_gmail_messages(
         elif threat_level.lower() == "critical":
             query = query.where(GmailMessage.risk_classification.in_(["Critical", "High", "Malicious"]))
 
+    if quarantine_status and quarantine_status != "all":
+        if quarantine_status == "quarantined":
+            query = query.where(GmailMessage.is_quarantined == True)
+        elif quarantine_status == "inbox":
+            query = query.where(GmailMessage.is_quarantined == False)
+        elif quarantine_status == "restored":
+            query = query.where(GmailMessage.quarantine_action_status == "restored")
+        elif quarantine_status == "failed":
+            query = query.where(GmailMessage.quarantine_action_status == "failed")
+
     query = query.order_by(desc(GmailMessage.received_at)).limit(limit)
     msg_res = await db.execute(query)
     messages = msg_res.scalars().all()
@@ -591,6 +652,12 @@ async def get_gmail_messages(
             "risk_score": m.risk_score,
             "risk_classification": m.risk_classification,
             "email_id": str(m.email_id) if m.email_id else None,
+            "is_quarantined": getattr(m, "is_quarantined", False),
+            "quarantined_at": m.quarantined_at.isoformat() if getattr(m, "quarantined_at", None) else None,
+            "quarantine_reason": getattr(m, "quarantine_reason", None),
+            "quarantine_action_status": getattr(m, "quarantine_action_status", "none"),
+            "quarantine_error": getattr(m, "quarantine_error", None),
+            "restored_at": m.restored_at.isoformat() if getattr(m, "restored_at", None) else None,
         })
 
     return success_response({
@@ -970,4 +1037,317 @@ async def gmail_pubsub_webhook(
         "email_address": target_email,
         "history_id": str(history_id),
         "message": "Pub/Sub notification acknowledged and history sync enqueued",
+    })
+
+
+# ---------------------------------------------------------------------------
+# Quarantine & Remediation Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/quarantine/settings")
+async def get_quarantine_settings(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns quarantine configuration, consent state, and modify permission explanation."""
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+
+    granted = integration.granted_scopes or [] if integration else []
+    has_modify = any("gmail.modify" in s for s in granted)
+
+    return success_response({
+        "is_connected": bool(integration),
+        "auto_quarantine_enabled": getattr(integration, "auto_quarantine_enabled", False) if integration else False,
+        "quarantine_consent_given_at": integration.quarantine_consent_given_at.isoformat() if integration and getattr(integration, "quarantine_consent_given_at", None) else None,
+        "quarantine_threshold_score": getattr(integration, "quarantine_threshold_score", 70) if integration else 70,
+        "quarantine_label_name": getattr(integration, "quarantine_label_name", "PhishGuard-Quarantine") if integration else "PhishGuard-Quarantine",
+        "quarantine_label_id": getattr(integration, "quarantine_label_id", None) if integration else None,
+        "has_modify_permission": has_modify,
+        "permission_explanation": (
+            "The 'https://www.googleapis.com/auth/gmail.modify' scope grants PhishGuard permission to "
+            "apply the custom 'PhishGuard-Quarantine' label and remove the 'INBOX' label for detected "
+            "phishing threats without permanently deleting the email. Quarantined messages can be safely "
+            "restored to your Inbox at any time."
+        ),
+    })
+
+
+@router.post("/quarantine/consent")
+async def enable_quarantine_consent(
+    payload: QuarantineConsentRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Enables automatic Gmail quarantine with explicit user consent.
+    Validates required gmail.modify permission.
+    """
+    if not payload.consent_acknowledged:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Explicit user consent acknowledgment is required to enable automatic quarantine.",
+        )
+
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active Gmail account connected for this user.",
+        )
+
+    granted = integration.granted_scopes or []
+    if not any("gmail.modify" in s for s in granted):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "The connected Gmail account does not have the 'https://www.googleapis.com/auth/gmail.modify' scope. "
+                "Please reconnect your account with the modify permission to enable quarantine."
+            ),
+        )
+
+    threshold = max(40, min(100, payload.threshold_score))
+    label_name = (payload.quarantine_label_name or "PhishGuard-Quarantine").strip()
+
+    now_dt = datetime.now(timezone.utc)
+    integration.auto_quarantine_enabled = True
+    integration.quarantine_consent_given_at = now_dt
+    integration.quarantine_threshold_score = threshold
+    integration.quarantine_label_name = label_name
+
+    from app.models import AuditLog
+    audit = AuditLog(
+        organization_id=current_user.organization_id,
+        user_id=current_user.id,
+        action="gmail.quarantine.consent_enabled",
+        resource_type="gmail_integration",
+        resource_id=integration.id,
+        details={
+            "email_address": integration.email_address,
+            "threshold_score": threshold,
+            "quarantine_label_name": label_name,
+        },
+        severity="info",
+    )
+    db.add(audit)
+    await db.commit()
+
+    return success_response({
+        "auto_quarantine_enabled": True,
+        "quarantine_consent_given_at": now_dt.isoformat(),
+        "quarantine_threshold_score": threshold,
+        "quarantine_label_name": label_name,
+        "message": f"Automatic Gmail quarantine enabled for threats scoring {threshold}+.",
+    })
+
+
+@router.post("/quarantine/disable")
+async def disable_quarantine(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Disables automatic Gmail quarantine at any time."""
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active Gmail account connected for this user.",
+        )
+
+    integration.auto_quarantine_enabled = False
+
+    from app.models import AuditLog
+    audit = AuditLog(
+        organization_id=current_user.organization_id,
+        user_id=current_user.id,
+        action="gmail.quarantine.disabled",
+        resource_type="gmail_integration",
+        resource_id=integration.id,
+        details={"email_address": integration.email_address},
+        severity="info",
+    )
+    db.add(audit)
+    await db.commit()
+
+    return success_response({
+        "auto_quarantine_enabled": False,
+        "message": "Automatic Gmail quarantine has been disabled.",
+    })
+
+
+@router.post("/messages/{message_id}/quarantine")
+async def quarantine_message_endpoint(
+    message_id: str,
+    payload: ManualQuarantineRequest = ManualQuarantineRequest(),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually quarantines a specific Gmail message."""
+    query = select(GmailMessage).where(
+        GmailMessage.organization_id == current_user.organization_id
+    )
+    try:
+        mid_uuid = uuid.UUID(message_id)
+        query = query.where((GmailMessage.id == mid_uuid) | (GmailMessage.gmail_message_id == message_id))
+    except ValueError:
+        query = query.where(GmailMessage.gmail_message_id == message_id)
+
+    res = await db.execute(query)
+    msg = res.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Gmail message not found or access denied.",
+        )
+
+    integ_res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.id == msg.integration_id,
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = integ_res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Associated Gmail integration is not connected.",
+        )
+
+    reason = payload.reason or "Manual quarantine requested by security analyst"
+    try:
+        result = await gmail_client_service.quarantine_message(
+            db=db,
+            user=current_user,
+            integration=integration,
+            gmail_msg=msg,
+            reason=reason,
+            is_automatic=False,
+        )
+        return success_response(result)
+    except GmailPermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except GmailAPIError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+
+@router.post("/messages/{message_id}/restore")
+async def restore_message_endpoint(
+    message_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restores a previously quarantined Gmail message back to INBOX."""
+    query = select(GmailMessage).where(
+        GmailMessage.organization_id == current_user.organization_id
+    )
+    try:
+        mid_uuid = uuid.UUID(message_id)
+        query = query.where((GmailMessage.id == mid_uuid) | (GmailMessage.gmail_message_id == message_id))
+    except ValueError:
+        query = query.where(GmailMessage.gmail_message_id == message_id)
+
+    res = await db.execute(query)
+    msg = res.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Gmail message not found or access denied.",
+        )
+
+    integ_res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.id == msg.integration_id,
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = integ_res.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Associated Gmail integration is not connected.",
+        )
+
+    try:
+        result = await gmail_client_service.restore_message(
+            db=db,
+            user=current_user,
+            integration=integration,
+            gmail_msg=msg,
+        )
+        return success_response(result)
+    except GmailPermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except GmailAPIError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+
+@router.get("/quarantine/records")
+async def get_quarantine_records(
+    limit: int = Query(50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns quarantined, restored, and failed messages for the dashboard."""
+    res = await db.execute(
+        select(GmailIntegration).where(
+            GmailIntegration.organization_id == current_user.organization_id,
+            GmailIntegration.user_id == current_user.id,
+            GmailIntegration.is_connected == True,
+        )
+    )
+    integration = res.scalar_one_or_none()
+    if not integration:
+        return success_response({"records": [], "total": 0})
+
+    query = select(GmailMessage).where(
+        GmailMessage.integration_id == integration.id,
+        (GmailMessage.is_quarantined == True) | (GmailMessage.quarantine_action_status.in_(["quarantined", "restored", "failed"]))
+    ).order_by(desc(GmailMessage.quarantined_at), desc(GmailMessage.received_at)).limit(limit)
+
+    records_res = await db.execute(query)
+    records = records_res.scalars().all()
+
+    formatted = []
+    for r in records:
+        formatted.append({
+            "id": str(r.id),
+            "gmail_message_id": r.gmail_message_id,
+            "subject": r.subject,
+            "sender": r.sender,
+            "received_at": r.received_at.isoformat() if r.received_at else None,
+            "risk_score": r.risk_score,
+            "risk_classification": r.risk_classification,
+            "is_quarantined": r.is_quarantined,
+            "quarantine_action_status": r.quarantine_action_status,
+            "quarantine_reason": r.quarantine_reason,
+            "quarantine_error": r.quarantine_error,
+            "quarantined_at": r.quarantined_at.isoformat() if r.quarantined_at else None,
+            "restored_at": r.restored_at.isoformat() if r.restored_at else None,
+        })
+
+    return success_response({
+        "records": formatted,
+        "total": len(formatted),
     })

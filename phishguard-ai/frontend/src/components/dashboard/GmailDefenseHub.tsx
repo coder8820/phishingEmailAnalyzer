@@ -25,6 +25,8 @@ import {
   X,
   FileText,
   Radio,
+  ShieldAlert,
+  RotateCcw,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -39,6 +41,10 @@ import {
   stopGmailWatch,
   analyzeGmailMessageManual,
   analyzeAllGmailPending,
+  enableQuarantineConsent,
+  disableQuarantine,
+  quarantineGmailMessage,
+  restoreGmailMessage,
   type GmailStatus,
   type GmailMessageItem,
 } from '@/services/gmailService'
@@ -59,6 +65,7 @@ export function GmailDefenseHub() {
   const [search, setSearch] = useState('')
   const [threatFilter, setThreatFilter] = useState<'all' | 'safe' | 'suspicious' | 'critical'>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'analyzed' | 'pending'>('all')
+  const [quarantineFilter, setQuarantineFilter] = useState<'all' | 'quarantined' | 'inbox' | 'restored' | 'failed'>('all')
 
   // Real Google OAuth 2.0 flow states
   const [isStartingOAuth, setIsStartingOAuth] = useState(false)
@@ -69,6 +76,14 @@ export function GmailDefenseHub() {
   const [consentChecked, setConsentChecked] = useState(false)
   const [scanLimit, setScanLimit] = useState(25)
   const [runningInitialScan, setRunningInitialScan] = useState(false)
+
+  // Quarantine explicit consent states
+  const [showQuarantineModal, setShowQuarantineModal] = useState(false)
+  const [quarantineConsentChecked, setQuarantineConsentChecked] = useState(false)
+  const [quarantineThreshold, setQuarantineThreshold] = useState(70)
+  const [enablingQuarantine, setEnablingQuarantine] = useState(false)
+  const [quarantiningId, setQuarantiningId] = useState<string | null>(null)
+  const [restoringId, setRestoringId] = useState<string | null>(null)
 
   // Check URL query parameters on return from backend callback
   useEffect(() => {
@@ -99,7 +114,17 @@ export function GmailDefenseHub() {
           threat_level: threatFilter,
           status_filter: statusFilter,
         })
-        setMessages(msgsRes.messages || [])
+        let msgs = msgsRes.messages || []
+        if (quarantineFilter === 'quarantined') {
+          msgs = msgs.filter((m) => m.is_quarantined)
+        } else if (quarantineFilter === 'inbox') {
+          msgs = msgs.filter((m) => !m.is_quarantined)
+        } else if (quarantineFilter === 'restored') {
+          msgs = msgs.filter((m) => m.quarantine_action_status === 'restored')
+        } else if (quarantineFilter === 'failed') {
+          msgs = msgs.filter((m) => m.quarantine_action_status === 'failed')
+        }
+        setMessages(msgs)
       } else {
         setMessages([])
       }
@@ -112,7 +137,7 @@ export function GmailDefenseHub() {
 
   useEffect(() => {
     loadData()
-  }, [threatFilter, statusFilter])
+  }, [threatFilter, statusFilter, quarantineFilter])
 
   // Search debounce
   useEffect(() => {
@@ -122,11 +147,23 @@ export function GmailDefenseHub() {
           search,
           threat_level: threatFilter,
           status_filter: statusFilter,
-        }).then((res) => setMessages(res.messages || []))
+        }).then((res) => {
+          let msgs = res.messages || []
+          if (quarantineFilter === 'quarantined') {
+            msgs = msgs.filter((m) => m.is_quarantined)
+          } else if (quarantineFilter === 'inbox') {
+            msgs = msgs.filter((m) => !m.is_quarantined)
+          } else if (quarantineFilter === 'restored') {
+            msgs = msgs.filter((m) => m.quarantine_action_status === 'restored')
+          } else if (quarantineFilter === 'failed') {
+            msgs = msgs.filter((m) => m.quarantine_action_status === 'failed')
+          }
+          setMessages(msgs)
+        })
       }
     }, 300)
     return () => clearTimeout(handler)
-  }, [search])
+  }, [search, quarantineFilter])
 
   const handleStartGoogleOAuth = async () => {
     setIsStartingOAuth(true)
@@ -260,6 +297,79 @@ export function GmailDefenseHub() {
     }
   }
 
+  const handleToggleQuarantine = async () => {
+    if (!status) return
+    if (status.auto_quarantine_enabled) {
+      if (
+        !confirm(
+          'Are you sure you want to disable automatic Gmail quarantine? PhishGuard will no longer automatically move threats out of your inbox.'
+        )
+      )
+        return
+      try {
+        await disableQuarantine()
+        toast.success('Automatic Gmail quarantine disabled')
+        await loadData(true)
+      } catch (err: any) {
+        toast.error('Failed to disable quarantine')
+      }
+    } else {
+      setShowQuarantineModal(true)
+    }
+  }
+
+  const handleEnableQuarantineSubmit = async () => {
+    if (!quarantineConsentChecked) {
+      toast.error('Explicit consent must be confirmed before enabling quarantine.')
+      return
+    }
+    setEnablingQuarantine(true)
+    try {
+      await enableQuarantineConsent({
+        consent_acknowledged: true,
+        threshold_score: quarantineThreshold,
+        quarantine_label_name: 'PhishGuard-Quarantine',
+      })
+      toast.success(`Automatic Quarantine Enabled (Threshold: ${quarantineThreshold}+)`)
+      setShowQuarantineModal(false)
+      setQuarantineConsentChecked(false)
+      await loadData(true)
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || err.message || 'Failed to enable quarantine'
+      toast.error(detail)
+    } finally {
+      setEnablingQuarantine(false)
+    }
+  }
+
+  const handleManualQuarantine = async (msgId: string) => {
+    setQuarantiningId(msgId)
+    try {
+      const res = await quarantineGmailMessage(msgId, 'Manual analyst quarantine')
+      toast.success(res.message || 'Email successfully moved to PhishGuard-Quarantine')
+      await loadData(true)
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || err.message || 'Quarantine failed'
+      toast.error(detail)
+    } finally {
+      setQuarantiningId(null)
+    }
+  }
+
+  const handleRestore = async (msgId: string) => {
+    setRestoringId(msgId)
+    try {
+      const res = await restoreGmailMessage(msgId)
+      toast.success(res.message || 'Email successfully restored to INBOX')
+      await loadData(true)
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || err.message || 'Restore failed'
+      toast.error(detail)
+    } finally {
+      setRestoringId(null)
+    }
+  }
+
   return (
     <div className="bg-gradient-to-b from-navy-850 to-navy-900 border border-navy-700/80 rounded-2xl p-6 shadow-xl relative overflow-hidden mb-8">
       {/* Background cyber glow accents */}
@@ -373,6 +483,34 @@ export function GmailDefenseHub() {
                 </span>
               </button>
 
+              {/* Auto-Quarantine Switch */}
+              <button
+                onClick={handleToggleQuarantine}
+                className={cn(
+                  'flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-mono font-medium transition-all border',
+                  status.auto_quarantine_enabled
+                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-sm shadow-rose-500/10'
+                    : 'bg-navy-800 text-slate-400 border-navy-700 hover:text-slate-200'
+                )}
+                title={status.auto_quarantine_enabled ? `Automatic quarantine active (${status.quarantine_threshold_score || 70}+). Click to disable.` : "Enable automatic quarantine for confirmed phishing threats."}
+              >
+                <ShieldAlert
+                  className={cn(
+                    'w-3.5 h-3.5',
+                    status.auto_quarantine_enabled ? 'text-rose-400 animate-pulse' : 'text-slate-500'
+                  )}
+                />
+                <span>Auto-Quarantine:</span>
+                <span
+                  className={cn(
+                    'font-bold',
+                    status.auto_quarantine_enabled ? 'text-rose-300' : 'text-slate-500'
+                  )}
+                >
+                  {status.auto_quarantine_enabled ? `ON (${status.quarantine_threshold_score || 70}+)` : 'OFF'}
+                </span>
+              </button>
+
               {/* Sync Button */}
               <button
                 onClick={handleSync}
@@ -441,7 +579,7 @@ export function GmailDefenseHub() {
       {status?.is_connected ? (
         <div className="mt-6 space-y-6">
           {/* Quick Stats Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3.5">
             <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
               <div>
                 <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Total Synced</p>
@@ -472,6 +610,21 @@ export function GmailDefenseHub() {
                 <p className="text-xl font-bold font-mono text-red-400 mt-1">{status.critical_threats}</p>
               </div>
               <Flame className="w-5 h-5 text-red-500" />
+            </div>
+
+            <div className="bg-navy-800/80 border border-navy-700/60 rounded-xl p-3.5 flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Quarantined</p>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <p className="text-xl font-bold font-mono text-purple-400">{status.quarantined_messages || 0}</p>
+                  {(status.failed_quarantines || 0) > 0 && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-red-500/20 text-red-400 border border-red-500/30">
+                      {status.failed_quarantines} err
+                    </span>
+                  )}
+                </div>
+              </div>
+              <ShieldAlert className="w-5 h-5 text-purple-400" />
             </div>
           </div>
 
@@ -524,6 +677,23 @@ export function GmailDefenseHub() {
                   </button>
                 ))}
               </div>
+
+              <div className="flex items-center bg-navy-900 border border-navy-700 rounded-lg p-0.5">
+                {(['all', 'quarantined', 'inbox', 'restored', 'failed'] as const).map((qf) => (
+                  <button
+                    key={qf}
+                    onClick={() => setQuarantineFilter(qf)}
+                    className={cn(
+                      'px-2.5 py-1 rounded text-[11px] font-mono uppercase transition-colors',
+                      quarantineFilter === qf
+                        ? 'bg-purple-600 text-white font-bold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    )}
+                  >
+                    {qf}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -547,7 +717,8 @@ export function GmailDefenseHub() {
                       <th className="py-3 px-4">Subject & Content</th>
                       <th className="py-3 px-4">Sender</th>
                       <th className="py-3 px-4">Risk Level</th>
-                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Quarantine</th>
+                      <th className="py-3 px-4">Analysis</th>
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -600,6 +771,28 @@ export function GmailDefenseHub() {
                             )}
                           </td>
                           <td className="py-3 px-4">
+                            {m.is_quarantined ? (
+                              <div className="flex items-center gap-1.5" title={m.quarantine_reason || 'Quarantined into PhishGuard-Quarantine'}>
+                                <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                                  <ShieldAlert className="w-3 h-3 text-purple-400" />
+                                  <span>Quarantined</span>
+                                </span>
+                              </div>
+                            ) : m.quarantine_action_status === 'restored' ? (
+                              <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-500/20 text-blue-300 border border-blue-500/40" title="Restored to INBOX">
+                                <RotateCcw className="w-3 h-3 text-blue-400" />
+                                <span>Restored</span>
+                              </span>
+                            ) : m.quarantine_action_status === 'failed' ? (
+                              <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-red-500/20 text-red-400 border border-red-500/40" title={m.quarantine_error || 'Quarantine failed'}>
+                                <AlertTriangle className="w-3 h-3 text-red-400" />
+                                <span>Failed</span>
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-500">Inbox</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
                             {m.is_analyzed ? (
                               <span className="flex items-center gap-1.5 text-emerald-400 text-[11px]">
                                 <CheckCircle2 className="w-3.5 h-3.5" />
@@ -619,13 +812,36 @@ export function GmailDefenseHub() {
                           </td>
                           <td className="py-3 px-4 text-right">
                             <div className="flex items-center justify-end gap-2">
+                              {/* Restore or Quarantine Action Button */}
+                              {m.is_quarantined ? (
+                                <button
+                                  onClick={() => handleRestore(m.id)}
+                                  disabled={restoringId === m.id}
+                                  className="flex items-center gap-1 px-2.5 py-1 bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border border-blue-500/30 rounded text-[11px] transition-colors"
+                                  title="Restore email back to user's Gmail INBOX"
+                                >
+                                  <RotateCcw className={cn('w-3 h-3', restoringId === m.id && 'animate-spin')} />
+                                  <span>Restore</span>
+                                </button>
+                              ) : m.is_analyzed && (m.risk_score || 0) >= 40 ? (
+                                <button
+                                  onClick={() => handleManualQuarantine(m.id)}
+                                  disabled={quarantiningId === m.id}
+                                  className="flex items-center gap-1 px-2.5 py-1 bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/30 rounded text-[11px] transition-colors"
+                                  title="Manually move suspicious/phishing email to PhishGuard-Quarantine"
+                                >
+                                  <ShieldAlert className={cn('w-3 h-3', quarantiningId === m.id && 'animate-spin')} />
+                                  <span>Quarantine</span>
+                                </button>
+                              ) : null}
+
                               {m.email_id ? (
                                 <button
                                   onClick={() => router.push(`/analyses/${m.email_id}`)}
                                   className="flex items-center gap-1 px-2.5 py-1 bg-navy-800 hover:bg-navy-700 text-slate-300 hover:text-white rounded border border-navy-700 text-[11px] transition-colors"
                                 >
                                   <Eye className="w-3 h-3" />
-                                  <span>View Report</span>
+                                  <span>Report</span>
                                 </button>
                               ) : (
                                 <button
@@ -634,7 +850,7 @@ export function GmailDefenseHub() {
                                   className="flex items-center gap-1 px-2.5 py-1 bg-accent-blue/15 hover:bg-accent-blue/25 text-accent-blue border border-accent-blue/30 rounded text-[11px] transition-colors"
                                 >
                                   <Zap className={cn('w-3 h-3', analyzingId === m.id && 'animate-spin')} />
-                                  <span>Analyze Now</span>
+                                  <span>Analyze</span>
                                 </button>
                               )}
                             </div>
@@ -801,6 +1017,123 @@ export function GmailDefenseHub() {
                     <span>Authorize & Start Scan</span>
                   </>
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Explicit User Consent Modal for Safe Gmail Phishing Quarantine */}
+      {showQuarantineModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-navy-850 border border-purple-500/40 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">
+            <button
+              onClick={() => {
+                setShowQuarantineModal(false)
+                setQuarantineConsentChecked(false)
+              }}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2.5 bg-purple-500/15 border border-purple-500/30 rounded-xl text-purple-300">
+                <ShieldAlert className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white font-mono">
+                  Enable Safe Gmail Phishing Quarantine
+                </h3>
+                <p className="text-xs text-slate-400 font-mono">
+                  Autonomous threat isolation with full auditability
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3.5 text-xs text-slate-300 font-sans leading-relaxed">
+              <div className="bg-navy-900 border border-navy-700/80 rounded-xl p-3.5 space-y-2 font-mono">
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <span>
+                    <strong>Least-Privilege modify Scope:</strong> Uses Google's official <code className="text-accent-blue bg-navy-800 px-1 py-0.5 rounded">gmail.modify</code> permission to apply the <code className="text-purple-300 bg-navy-800 px-1 py-0.5 rounded">PhishGuard-Quarantine</code> label and remove the <code className="text-slate-300 bg-navy-800 px-1 py-0.5 rounded">INBOX</code> label.
+                  </span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <span>
+                    <strong>Non-Destructive & Safe:</strong> Messages are <em>never</em> permanently deleted, forwarded, or executed.
+                  </span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <span>
+                    <strong>Instant Restore:</strong> Any quarantined email can be restored directly back to your Inbox with one click.
+                  </span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <span>
+                    <strong>Can Be Disabled Anytime:</strong> You can toggle automatic quarantine off instantly at any time.
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <label className="text-[11px] font-mono uppercase tracking-wider text-slate-400 block">
+                  Threat Quarantine Threshold (Default: 70 - High/Critical)
+                </label>
+                <select
+                  value={quarantineThreshold}
+                  onChange={(e) => setQuarantineThreshold(Number(e.target.value))}
+                  className="w-full bg-navy-900 border border-navy-700 rounded-lg px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-purple-500"
+                >
+                  <option value={70}>70+ (High & Critical Phishing Threats - Recommended)</option>
+                  <option value={80}>80+ (Very High & Critical Threats Only)</option>
+                  <option value={90}>90+ (Critical Phishing Only)</option>
+                  <option value={60}>60+ (Medium, High & Critical)</option>
+                </select>
+                <p className="text-[10px] text-slate-500 font-mono">
+                  Threats below this score will remain in your Inbox with a security alert badge for manual review.
+                </p>
+              </div>
+
+              {/* Consent Confirmation Checkbox */}
+              <label className="flex items-start gap-3 p-3 bg-purple-500/10 border border-purple-500/30 rounded-xl cursor-pointer hover:bg-purple-500/15 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={quarantineConsentChecked}
+                  onChange={(e) => setQuarantineConsentChecked(e.target.checked)}
+                  className="mt-0.5 rounded border-navy-700 bg-navy-900 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                />
+                <span className="text-[11px] text-purple-200 font-mono leading-snug">
+                  I explicitly consent to allow PhishGuard AI to automatically isolate confirmed phishing emails scoring {quarantineThreshold}+ into the PhishGuard-Quarantine label.
+                </span>
+              </label>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 mt-5 pt-4 border-t border-navy-700/70">
+              <button
+                onClick={() => {
+                  setShowQuarantineModal(false)
+                  setQuarantineConsentChecked(false)
+                }}
+                disabled={enablingQuarantine}
+                className="px-4 py-2 bg-navy-800 hover:bg-navy-750 text-slate-300 rounded-xl text-xs font-mono transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleEnableQuarantineSubmit}
+                disabled={!quarantineConsentChecked || enablingQuarantine}
+                className="flex items-center gap-2 px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-mono font-semibold transition-all shadow-md shadow-purple-600/20 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {enablingQuarantine ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                )}
+                <span>{enablingQuarantine ? 'Enabling...' : 'Confirm & Enable Quarantine'}</span>
               </button>
             </div>
           </div>

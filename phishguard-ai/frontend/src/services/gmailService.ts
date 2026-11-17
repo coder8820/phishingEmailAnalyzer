@@ -13,11 +13,19 @@ export interface GmailStatus {
   last_history_id?: string | null
   pubsub_topic?: string | null
   auto_analyze_enabled: boolean
+  auto_quarantine_enabled?: boolean
+  quarantine_consent_given_at?: string | null
+  quarantine_threshold_score?: number
+  quarantine_label_name?: string
+  quarantine_label_id?: string | null
   auth_type?: string
   total_messages: number
   analyzed_messages: number
   pending_messages: number
   critical_threats: number
+  quarantined_messages?: number
+  restored_messages?: number
+  failed_quarantines?: number
   last_synced_at: string | null
 }
 
@@ -57,6 +65,45 @@ export interface GmailMessageItem {
   risk_score: number | null
   risk_classification: string | null
   email_id: string | null
+  is_quarantined?: boolean
+  quarantined_at?: string | null
+  quarantine_reason?: string | null
+  quarantine_action_status?: 'none' | 'quarantined' | 'restored' | 'failed' | string
+  quarantine_error?: string | null
+  restored_at?: string | null
+}
+
+export interface QuarantineSettings {
+  is_connected: boolean
+  auto_quarantine_enabled: boolean
+  quarantine_consent_given_at: string | null
+  quarantine_threshold_score: number
+  quarantine_label_name: string
+  quarantine_label_id: string | null
+  has_modify_permission: boolean
+  permission_explanation: string
+}
+
+export interface QuarantineConsentPayload {
+  consent_acknowledged: boolean
+  threshold_score?: number
+  quarantine_label_name?: string
+}
+
+export interface QuarantineRecordItem {
+  id: string
+  gmail_message_id: string
+  subject: string
+  sender: string
+  received_at: string | null
+  risk_score: number | null
+  risk_classification: string | null
+  is_quarantined: boolean
+  quarantine_action_status: string
+  quarantine_reason: string | null
+  quarantine_error: string | null
+  quarantined_at: string | null
+  restored_at: string | null
 }
 
 export interface GmailMessagesResponse {
@@ -172,5 +219,35 @@ export async function startGmailWatch(): Promise<any> {
 
 export async function stopGmailWatch(): Promise<any> {
   const { data } = await apiClient.post('/gmail/stop-watch')
+  return data.data
+}
+
+export async function getQuarantineSettings(): Promise<QuarantineSettings> {
+  const { data } = await apiClient.get('/gmail/quarantine/settings')
+  return data.data
+}
+
+export async function enableQuarantineConsent(payload: QuarantineConsentPayload): Promise<any> {
+  const { data } = await apiClient.post('/gmail/quarantine/consent', payload)
+  return data.data
+}
+
+export async function disableQuarantine(): Promise<any> {
+  const { data } = await apiClient.post('/gmail/quarantine/disable')
+  return data.data
+}
+
+export async function quarantineGmailMessage(messageId: string, reason?: string): Promise<any> {
+  const { data } = await apiClient.post(`/gmail/messages/${messageId}/quarantine`, { reason })
+  return data.data
+}
+
+export async function restoreGmailMessage(messageId: string): Promise<any> {
+  const { data } = await apiClient.post(`/gmail/messages/${messageId}/restore`)
+  return data.data
+}
+
+export async function getQuarantineRecords(limit: number = 50): Promise<{ records: QuarantineRecordItem[]; total: number }> {
+  const { data } = await apiClient.get(`/gmail/quarantine/records?limit=${limit}`)
   return data.data
 }
