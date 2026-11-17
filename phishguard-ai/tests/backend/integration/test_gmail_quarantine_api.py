@@ -262,3 +262,75 @@ async def test_quarantine_tenant_isolation_api(authenticated_client: AsyncClient
         json={"reason": "Unauthorized access test"},
     )
     assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_report_false_positive_api(authenticated_client: AsyncClient, db_session):
+    """
+    Verify G5 Requirement 6.6 & Endpoint integration:
+    Reporting a false positive restores the message to INBOX, updates status to false_positive,
+    and reflects in both /quarantine/records and /messages?quarantine_status=false_positive.
+    """
+    user_id = authenticated_client.user.id
+    org_id = authenticated_client.user.organization_id
+
+    integration = GmailIntegration(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        user_id=user_id,
+        email_address="analyst@securecorp.com",
+        is_connected=True,
+        refresh_token_encrypted=b"dummy_token",
+        granted_scopes=["https://www.googleapis.com/auth/gmail.modify"],
+        quarantine_label_id="Label_Q123",
+        quarantine_label_name="PhishGuard-Quarantine",
+    )
+    db_session.add(integration)
+
+    msg = GmailMessage(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        user_id=user_id,
+        integration_id=integration.id,
+        gmail_message_id="msg_fp_test_123",
+        subject="Important Quarterly Update",
+        sender="updates@trustedcorp.com",
+        is_analyzed=True,
+        analysis_status="analyzed",
+        risk_score=75,
+        risk_classification="High",
+        is_quarantined=True,
+        quarantine_action_status="quarantined",
+        label_ids=["Label_Q123"],
+        original_labels=["INBOX", "UNREAD"],
+    )
+    db_session.add(msg)
+    await db_session.commit()
+
+    async def mock_api(db, integration, method, url, **kwargs):
+        m = MagicMock()
+        m.status_code = 200
+        m.json.return_value = {"id": msg.gmail_message_id, "labelIds": ["INBOX", "UNREAD"]}
+        return m
+
+    with patch.object(gmail_client_service, "_make_api_request", side_effect=mock_api):
+        res = await authenticated_client.post(
+            f"/api/v1/gmail/messages/{msg.id}/report-false-positive",
+            json={"feedback": "Legitimate quarterly briefing"},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["data"]["status"] == "false_positive_recorded"
+        assert body["data"]["restored"] is True
+
+        # Verify in /quarantine/records
+        rec_res = await authenticated_client.get("/api/v1/gmail/quarantine/records")
+        assert rec_res.status_code == 200
+        records = rec_res.json()["data"]["records"]
+        assert any(r["id"] == str(msg.id) and r["quarantine_action_status"] == "false_positive" for r in records)
+
+        # Verify in /messages?quarantine_status=false_positive
+        filter_res = await authenticated_client.get("/api/v1/gmail/messages?quarantine_status=false_positive")
+        assert filter_res.status_code == 200
+        msgs = filter_res.json()["data"]["messages"]
+        assert any(m["id"] == str(msg.id) for m in msgs)
