@@ -722,7 +722,7 @@ export default function SettingsPage() {
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-400 mt-1">
-                        <strong>Justification:</strong> "{req.justification}"
+                        <strong>Justification:</strong> &ldquo;{req.justification}&rdquo;
                       </p>
                       {req.admin_notes && (
                         <p className="text-[11px] text-accent-cyan mt-1">
@@ -1130,7 +1130,7 @@ export default function SettingsPage() {
                             <span className="text-slate-500 font-mono">({req.user_email})</span>
                           </div>
                           <p className="text-xs text-slate-300 bg-navy-950 p-2.5 rounded-lg border border-navy-800">
-                            "{req.justification}"
+                            &ldquo;{req.justification}&rdquo;
                           </p>
                           {req.admin_notes && (
                             <p className="text-xs text-purple-300">
@@ -1367,7 +1367,7 @@ export default function SettingsPage() {
                     Feature: <strong className="text-accent-cyan">{reviewingRequest.feature_name}</strong>
                   </div>
                   <p className="text-xs text-slate-300 mt-2 italic">
-                    "{reviewingRequest.justification}"
+                    &ldquo;{reviewingRequest.justification}&rdquo;
                   </p>
                 </div>
 
@@ -1427,7 +1427,7 @@ export default function SettingsPage() {
 
                 <div className="bg-navy-950 p-3 rounded-xl border border-navy-800 text-xs text-slate-300">
                   <strong>Subject:</strong> {replyingToMessage.subject}
-                  <p className="mt-1 text-slate-400 italic">"{replyingToMessage.message}"</p>
+                  <p className="mt-1 text-slate-400 italic">&ldquo;{replyingToMessage.message}&rdquo;</p>
                 </div>
 
                 <form onSubmit={handleSendAdminReply} className="space-y-4">
