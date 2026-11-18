@@ -500,7 +500,7 @@ export default function LandingPage() {
                   <span>AI CONTEXTUAL THREAT VERDICT & EXPLANATION</span>
                 </div>
                 <p className="text-xs sm:text-sm text-slate-300 leading-relaxed font-sans">
-                  "{currentScenario.verdict}"
+                  &ldquo;{currentScenario.verdict}&rdquo;
                 </p>
                 <div className="flex flex-wrap gap-2 pt-2">
                   {currentScenario.tags.map((tag) => (

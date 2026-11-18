@@ -1004,7 +1004,7 @@ export function GmailDefenseHub() {
             Connect Your Gmail Account with Official Google OAuth 2.0
           </h3>
           <p className="text-xs text-slate-400 max-w-lg mt-1.5 leading-relaxed">
-            Link your Google account securely via Google's official consent screen. PhishGuard requests the least-privilege
+            Link your Google account securely via Google&apos;s official consent screen. PhishGuard requests the least-privilege
             <code className="text-accent-blue bg-navy-900 px-1 py-0.5 rounded mx-1">gmail.modify</code>
             scope for inspection and quarantine. All refresh tokens are AES-128 encrypted at rest.
           </p>
@@ -1206,7 +1206,7 @@ export function GmailDefenseHub() {
                 <div className="flex items-start gap-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                   <span>
-                    <strong>Least-Privilege modify Scope:</strong> Uses Google's official <code className="text-accent-blue bg-navy-800 px-1 py-0.5 rounded">gmail.modify</code> permission to apply the <code className="text-purple-300 bg-navy-800 px-1 py-0.5 rounded">PhishGuard-Quarantine</code> label and remove the <code className="text-slate-300 bg-navy-800 px-1 py-0.5 rounded">INBOX</code> label.
+                    <strong>Least-Privilege modify Scope:</strong> Uses Google&apos;s official <code className="text-accent-blue bg-navy-800 px-1 py-0.5 rounded">gmail.modify</code> permission to apply the <code className="text-purple-300 bg-navy-800 px-1 py-0.5 rounded">PhishGuard-Quarantine</code> label and remove the <code className="text-slate-300 bg-navy-800 px-1 py-0.5 rounded">INBOX</code> label.
                   </span>
                 </div>
                 <div className="flex items-start gap-2">
@@ -1402,7 +1402,7 @@ export function GmailDefenseHub() {
             <div className="space-y-3.5 text-xs text-slate-300 font-sans leading-relaxed">
               <div className="bg-navy-900 border border-navy-700/80 rounded-xl p-3.5 space-y-2 font-mono text-[11px]">
                 <p className="text-slate-400">
-                  <strong>Google Limited Use Compliance:</strong> PhishGuard AI's use and transfer of information received from Google APIs strictly adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noreferrer" className="text-accent-blue underline">Google API Services User Data Policy</a>.
+                  <strong>Google Limited Use Compliance:</strong> PhishGuard AI&apos;s use and transfer of information received from Google APIs strictly adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noreferrer" className="text-accent-blue underline">Google API Services User Data Policy</a>.
                 </p>
                 <div className="pt-2 border-t border-navy-800 space-y-1">
                   <p><span className="text-slate-400">Raw MIME Byte Retention:</span> <span className="text-white font-medium">{privacyPolicy?.data_retention_days?.raw_mime_content ?? 30} days</span></p>

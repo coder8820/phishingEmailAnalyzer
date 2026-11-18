@@ -204,7 +204,7 @@ export default function LoginPage() {
 
           <div className="mt-6 text-center">
             <p className="text-sm text-slate-400">
-              Don't have an analyst account?{' '}
+              Don&apos;t have an analyst account?{' '}
               <Link href="/register" className="text-accent-blue hover:text-blue-400 font-medium transition-colors">
                 Register here
               </Link>
