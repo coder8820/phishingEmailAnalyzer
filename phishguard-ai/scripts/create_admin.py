@@ -3,6 +3,10 @@ PhishGuard AI — Admin User Bootstrap Utility
 Usage:
   python scripts/create_admin.py --email admin@phishguard.local --password "StrongPassword123!" --org "Primary SOC"
 """
+
+# use this password as admin
+
+
 import argparse
 import asyncio
 import os
