@@ -33,6 +33,7 @@ import {
   getGmailStatus,
   getGmailMessages,
   getGoogleOAuthUrl,
+  connectGmail,
   disconnectGmail,
   toggleAutoAnalyze,
   syncGmailInbox,
