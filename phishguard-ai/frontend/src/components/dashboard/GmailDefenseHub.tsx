@@ -100,6 +100,12 @@ export function GmailDefenseHub() {
   const [deletionConfirmText, setDeletionConfirmText] = useState('')
   const [isDeletingData, setIsDeletingData] = useState(false)
 
+  // Manual / Direct App Password Connect modal
+  const [showManualConnectModal, setShowManualConnectModal] = useState(false)
+  const [manualEmail, setManualEmail] = useState('')
+  const [manualAppPassword, setManualAppPassword] = useState('')
+  const [isConnectingManual, setIsConnectingManual] = useState(false)
+
   // Check URL query parameters on return from backend callback
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -201,6 +207,36 @@ export function GmailDefenseHub() {
       toast.error(detail)
     } finally {
       setIsStartingOAuth(false)
+    }
+  }
+
+  const handleManualConnect = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!manualEmail.trim()) {
+      toast.error('Please enter a valid Gmail address.')
+      return
+    }
+    setIsConnectingManual(true)
+    try {
+      await connectGmail({
+        email_address: manualEmail.trim(),
+        app_password: manualAppPassword.trim() || undefined,
+        auto_analyze: true,
+      })
+      toast.success(`Successfully connected Gmail account (${manualEmail.trim()})`)
+      setShowManualConnectModal(false)
+      setManualEmail('')
+      setManualAppPassword('')
+      await loadData()
+    } catch (err: any) {
+      const detail =
+        err.response?.data?.detail ||
+        err.response?.data?.error?.message ||
+        err.message ||
+        'Failed to connect Gmail'
+      toast.error(detail)
+    } finally {
+      setIsConnectingManual(false)
     }
   }
 
@@ -1046,6 +1082,19 @@ export function GmailDefenseHub() {
           <p className="text-[10px] text-slate-500 font-mono mt-3">
             Offline access enabled for autonomous background monitoring & quarantine.
           </p>
+
+          <div className="mt-5 pt-4 border-t border-navy-800/80 flex flex-col items-center gap-2">
+            <span className="text-[11px] text-slate-400 font-mono">
+              Don&apos;t have Google Cloud OAuth credentials configured yet?
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowManualConnectModal(true)}
+              className="text-xs text-accent-cyan hover:text-cyan-300 font-mono font-semibold underline cursor-pointer transition-colors"
+            >
+              Connect via App Password / Direct Connect (Testing Mode)
+            </button>
+          </div>
         </div>
       )}
 
@@ -1455,6 +1504,97 @@ export function GmailDefenseHub() {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Direct / App Password Connection Modal */}
+      {showManualConnectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-navy-900 border border-navy-700 rounded-2xl max-w-md w-full p-6 shadow-2xl relative space-y-4 animate-in fade-in duration-200">
+            <div className="flex items-start justify-between pb-3 border-b border-navy-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-accent-blue/15 border border-accent-blue/30 rounded-xl text-accent-cyan">
+                  <Mail className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-mono">
+                    Direct Gmail Connection
+                  </h3>
+                  <p className="text-xs text-slate-400 font-mono">
+                    Connect via Gmail Address &amp; App Password
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowManualConnectModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleManualConnect} className="space-y-4 text-xs font-mono">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  Gmail Address <span className="text-red-400">*</span>
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="e.g. your-email@gmail.com"
+                  value={manualEmail}
+                  onChange={(e) => setManualEmail(e.target.value)}
+                  className="w-full bg-navy-950 border border-navy-700 rounded-xl p-3 text-xs text-white focus:outline-none focus:border-accent-blue font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  Google App Password (Optional for Testing)
+                </label>
+                <input
+                  type="password"
+                  placeholder="16-character Google App Password (e.g. abcd efgh ijkl mnop)"
+                  value={manualAppPassword}
+                  onChange={(e) => setManualAppPassword(e.target.value)}
+                  className="w-full bg-navy-950 border border-navy-700 rounded-xl p-3 text-xs text-white focus:outline-none focus:border-accent-blue font-mono"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  You can generate an App Password at{' '}
+                  <a
+                    href="https://myaccount.google.com/apppasswords"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-accent-blue underline"
+                  >
+                    myaccount.google.com/apppasswords
+                  </a>
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-navy-800">
+                <button
+                  type="button"
+                  onClick={() => setShowManualConnectModal(false)}
+                  className="px-4 py-2 rounded-xl bg-navy-800 hover:bg-navy-750 text-slate-300 text-xs font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isConnectingManual}
+                  className="px-4 py-2 rounded-xl bg-accent-blue hover:bg-blue-600 text-white text-xs font-semibold shadow-lg shadow-accent-blue/20 cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {isConnectingManual ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>Connect Gmail</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
