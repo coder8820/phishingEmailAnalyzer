@@ -54,7 +54,6 @@ import {
 import { toast } from 'sonner'
 import { useAuthStore } from '@/store/authStore'
 import { LandingNav } from '@/components/layout/LandingNav'
-import { LandingAIAssistantRobot } from '@/components/chat/LandingAIAssistantRobot'
 import { cn } from '@/lib/utils'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1622,9 +1621,6 @@ export default function LandingPage() {
           </div>
         </div>
       )}
-
-      {/* Floating Animated AI Assistant Robot */}
-      <LandingAIAssistantRobot />
     </div>
   )
 }
