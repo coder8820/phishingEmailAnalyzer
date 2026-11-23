@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { Eye, EyeOff, Shield, AlertCircle, Lock } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/store/authStore'
+import { GoogleSignInButton } from '@/components/auth/GoogleSignInButton'
 import { cn } from '@/lib/utils'
 
 const loginSchema = z.object({
@@ -116,6 +117,24 @@ export default function LoginPage() {
               <p className="text-red-400 text-sm">{errorMessage}</p>
             </div>
           )}
+
+          {/* Google Sign In Button */}
+          <div className="mb-5">
+            <GoogleSignInButton
+              intent="login"
+              text="Sign in with Google"
+              onError={(err) => setErrorMessage(err)}
+            />
+          </div>
+
+          {/* Divider */}
+          <div className="relative flex py-1.5 items-center mb-5">
+            <div className="flex-grow border-t border-navy-600"></div>
+            <span className="flex-shrink mx-3 text-xs uppercase tracking-wider text-slate-500 font-medium">
+              or continue with email
+            </span>
+            <div className="flex-grow border-t border-navy-600"></div>
+          </div>
 
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
             {/* Email */}

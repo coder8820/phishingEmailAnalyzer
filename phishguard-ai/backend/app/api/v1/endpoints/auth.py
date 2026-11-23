@@ -7,7 +7,7 @@ from typing import Optional
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ from app.security.auth import (
     hash_password,
     verify_password,
 )
+from app.services.google_auth_service import google_auth_service
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -74,6 +75,21 @@ class ChangePasswordRequest(BaseModel):
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters")
         return v
+
+
+class GoogleCallbackRequest(BaseModel):
+    code: str
+    state: str
+    redirect_uri: Optional[str] = None
+
+
+class GoogleTokenRequest(BaseModel):
+    credential: str
+
+
+class GoogleDemoRequest(BaseModel):
+    email: Optional[str] = "google.analyst@phishguard.local"
+    display_name: Optional[str] = "Google SOC Analyst"
 
 
 async def _write_audit_log(
@@ -339,3 +355,223 @@ async def forgot_password(body: dict) -> dict:
 @router.post("/reset-password", response_model=dict)
 async def reset_password(body: dict) -> dict:
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Configure SMTP to enable password reset")
+
+
+# ============================================================
+# GOOGLE OAUTH 2.0 SINGLE SIGN-ON (LOGIN & REGISTRATION)
+# ============================================================
+
+@router.get("/google/config", response_model=dict, summary="Check Google OAuth configuration")
+async def get_google_oauth_config() -> dict:
+    """Returns whether Google OAuth 2.0 is configured on the backend server."""
+    client_id = settings.GOOGLE_CLIENT_ID.strip() if settings.GOOGLE_CLIENT_ID else ""
+    return {
+        "success": True,
+        "data": {
+            "is_configured": google_auth_service.is_configured,
+            "client_id": client_id,
+            "demo_mode_allowed": settings.APP_ENV != "production",
+        },
+        "error": None,
+    }
+
+
+@router.get("/google/url", response_model=dict, summary="Generate Google OAuth authorization URL")
+async def get_google_auth_url(
+    redirect_uri: Optional[str] = Query(None),
+    intent: str = Query("login", pattern="^(login|register)$"),
+) -> dict:
+    """
+    Generates a secure Google OAuth 2.0 authorization URL with PKCE (RFC 7636)
+    and cryptographically signed CSRF state token.
+    """
+    try:
+        auth_url, state = google_auth_service.create_authorization_url(
+            redirect_uri=redirect_uri,
+            intent=intent,
+        )
+        return {
+            "success": True,
+            "data": {
+                "authorization_url": auth_url,
+                "state": state,
+            },
+            "error": None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("failed_to_generate_google_auth_url", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate Google authorization URL: {str(e)}",
+        )
+
+
+@router.post("/google/callback", response_model=dict, summary="Exchange Google OAuth code for tokens")
+async def google_auth_callback(
+    request: Request,
+    body: GoogleCallbackRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Validates state token, exchanges Google authorization code via PKCE,
+    fetches Google profile, and signs in or auto-registers the analyst.
+    """
+    state_payload = google_auth_service.decode_and_validate_state(body.state)
+    code_verifier = state_payload.get("verifier")
+    if not code_verifier:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing PKCE code verifier in state.",
+        )
+
+    redirect_uri = body.redirect_uri or state_payload.get("redirect_uri")
+    if not redirect_uri:
+        redirect_uri = getattr(settings, "GOOGLE_AUTH_REDIRECT_URI", f"{settings.FRONTEND_URL}/auth/google/callback")
+
+    # Exchange authorization code for tokens
+    token_response = await google_auth_service.exchange_code(
+        code=body.code,
+        code_verifier=code_verifier,
+        redirect_uri=redirect_uri,
+    )
+
+    access_token_google = token_response.get("access_token")
+    if not access_token_google:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No access token received from Google.",
+        )
+
+    # Fetch Google user profile
+    profile = await google_auth_service.get_user_profile(access_token_google)
+    email = profile.get("email")
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google profile does not contain an email address.",
+        )
+
+    user, access_token, refresh_token, is_new = await google_auth_service.authenticate_or_register_user(
+        db=db,
+        request=request,
+        email=email,
+        display_name=profile.get("name"),
+        google_sub=profile.get("sub"),
+        picture=profile.get("picture"),
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "is_new_user": is_new,
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "username": user.username,
+                "display_name": user.display_name,
+                "role": user.role,
+                "organization_id": str(user.organization_id),
+            },
+        },
+        "error": None,
+    }
+
+
+@router.post("/google/token", response_model=dict, summary="Authenticate via Google ID token (One-Tap / GIS)")
+async def google_token_login(
+    request: Request,
+    body: GoogleTokenRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Direct Google Identity Services (GIS) / One-Tap authentication.
+    Validates the Google ID token and logs in or registers the user.
+    """
+    payload = await google_auth_service.verify_id_token(body.credential)
+    email = payload.get("email")
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google ID token does not contain an email.",
+        )
+
+    user, access_token, refresh_token, is_new = await google_auth_service.authenticate_or_register_user(
+        db=db,
+        request=request,
+        email=email,
+        display_name=payload.get("name"),
+        google_sub=payload.get("sub"),
+        picture=payload.get("picture"),
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "is_new_user": is_new,
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "username": user.username,
+                "display_name": user.display_name,
+                "role": user.role,
+                "organization_id": str(user.organization_id),
+            },
+        },
+        "error": None,
+    }
+
+
+@router.post("/google/demo", response_model=dict, summary="Instant Google Sign-In for Dev/Demo environments")
+async def google_demo_login(
+    request: Request,
+    body: GoogleDemoRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Instant demo Google authentication for development environments.
+    Enabled when credentials are not configured or in development mode.
+    """
+    if settings.APP_ENV == "production" and google_auth_service.is_configured:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo Google Sign-In is disabled in production.",
+        )
+
+    email = body.email or "google.analyst@phishguard.local"
+    display_name = body.display_name or "Google SOC Analyst"
+
+    user, access_token, refresh_token, is_new = await google_auth_service.authenticate_or_register_user(
+        db=db,
+        request=request,
+        email=email,
+        display_name=display_name,
+        google_sub="demo_google_sub_12345",
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "is_new_user": is_new,
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "username": user.username,
+                "display_name": user.display_name,
+                "role": user.role,
+                "organization_id": str(user.organization_id),
+            },
+        },
+        "error": None,
+    }
+
